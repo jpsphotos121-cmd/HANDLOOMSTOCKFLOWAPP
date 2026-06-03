@@ -26,6 +26,61 @@ import { BiltyInput, DynamicFields } from "./BiltyInput";
 import { ComboInput } from "./ComboInput";
 import { ItemNameCombo } from "./ItemNameCombo";
 
+// Helper: parse a full bilty label like "sola-1211X10(3)" into components.
+// Returns { base: "sola-1211", count: 10, idx: 3 } or null for simple bilties.
+function parseBiltyLabel(
+  fullBilty: string,
+): { base: string; count: number; idx: number } | null {
+  const m = fullBilty.match(/^(.+?)X(\d+)\((\d+)\)$/i);
+  if (!m) return null;
+  return {
+    base: m[1],
+    count: Number.parseInt(m[2], 10),
+    idx: Number.parseInt(m[3], 10),
+  };
+}
+
+// 4-rule duplicate check for bilty uniqueness.
+// Returns true if `candidate` is a duplicate of `existing`.
+function isBiltyDuplicate(candidate: string, existing: string): boolean {
+  const c = candidate.toLowerCase();
+  const e = existing.toLowerCase();
+  const cParsed = parseBiltyLabel(c);
+  const eParsed = parseBiltyLabel(e);
+
+  if (cParsed && eParsed) {
+    // Both are packaged bilties (base + count + idx)
+    if (cParsed.base !== eParsed.base) return false; // different base → no conflict
+    // Same base: different count → block (package count contradiction — Rule 3)
+    if (cParsed.count !== eParsed.count) return true;
+    // Same base + same count + same idx → true duplicate (Rule 1)
+    if (cParsed.idx === eParsed.idx) return true;
+    // Same base + same count + different idx → sibling package — ALLOW (Rule 2)
+    return false;
+  }
+  if (!cParsed && !eParsed) {
+    // Both are simple (no package suffix) — exact match = duplicate
+    return c === e;
+  }
+  if (cParsed && !eParsed) {
+    // Candidate is packaged, existing is plain base.
+    // e.g. existing = "sola-1211", candidate = "sola-1211X10(1)"
+    // If the packaged base equals the plain bilty, they share the same shipment — block
+    return cParsed.base === e;
+  }
+  if (!cParsed && eParsed) {
+    // Candidate is plain, existing is packaged (Rule 3 variant)
+    return c === eParsed.base;
+  }
+  return false;
+}
+
+// Rule 4: Validate that the user is not typing a suffixed string as a base bilty.
+// Returns true if biltyNumber looks like it already has a package suffix.
+function hasBiltyPackageSuffix(biltyNumber: string): boolean {
+  return /X\d+(\(\d+\))?$/i.test(biltyNumber);
+}
+
 function InwardTab({
   inventory,
   categories,
@@ -52,6 +107,7 @@ function InwardTab({
   fieldLabels,
   requiredFields,
   deliveredBilties,
+  batchUpdateStockForInward,
 }: {
   inventory: Record<string, InventoryItem>;
   categories: Category[];
@@ -94,6 +150,7 @@ function InwardTab({
   fieldLabels?: Record<string, Record<string, string>>;
   requiredFields?: Record<string, Record<string, boolean>>;
   deliveredBilties?: string[];
+  batchUpdateStockForInward?: (baleItems: any[]) => void;
 }) {
   const _lbl = (key: string, def: string) => fieldLabels?.inward?.[key] || def;
   const [biltyPrefix, setBiltyPrefix] = useState(biltyPrefixes?.[0] || "0");
@@ -200,6 +257,9 @@ function InwardTab({
     if (biltyNumber) {
       setPerBaleData(
         Array.from({ length: pkgCount }, (_, i) => {
+          // FIX: for queue/transit entries, generate correct slot labels using
+          // base bilty + X{totalPkgs}({slotIndex}) pattern for ALL slots.
+          // Never append a suffix to an already-suffixed bilty string.
           const label = pkgCount === 1 ? bNo : `${bNo}X${pkgCount}(${i + 1})`;
           const existingTx = transactions.find(
             (tx) =>
@@ -293,29 +353,49 @@ function InwardTab({
   const handleLookup = (pPrefix: string, pNumber: string) => {
     const bNo = pPrefix === "0" ? pNumber : `${pPrefix}-${pNumber}`;
     const searchStr = bNo.toLowerCase();
-    // Check if already in Inward Saved
-    const baseBiltyCheck = bNo.replace(/X\d+\(\d+\)$/i, "").toLowerCase();
+
+    // Pre-scan queue and transit to detect if this is a multi-package bilty.
+    // When pkgCount > 1, use the first package label as the check candidate so Rule 4
+    // (plain vs packaged) does not falsely block valid sibling lookups.
+    const queueOrTransitMatch =
+      pendingParcels.find(
+        (p) =>
+          (p.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
+          searchStr,
+      ) ||
+      transitGoods.find(
+        (g) =>
+          (g.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
+          searchStr,
+      );
+    const preScanPkgCount = (() => {
+      if (!queueOrTransitMatch) return 1;
+      const m = (queueOrTransitMatch as { biltyNo?: string }).biltyNo?.match(
+        /X(\d+)\(\d+\)$/i,
+      );
+      if (m) return Number(m[1]);
+      const pkg =
+        (queueOrTransitMatch as PendingParcel).packages ||
+        (queueOrTransitMatch as TransitRecord).packages;
+      return Number(pkg) || 1;
+    })();
+    const dupeCheckCandidate =
+      preScanPkgCount > 1 ? `${bNo}X${preScanPkgCount}(1)` : bNo;
+
+    // Check if already in Inward Saved (4-rule logic: allow sibling packages)
     const alreadySaved = (inwardSaved || []).some(
       (s) =>
         (!s.businessId || s.businessId === activeBusinessId) &&
-        ((s.biltyNumber || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-          baseBiltyCheck ||
-          (s.baseNumber || "").toLowerCase() === baseBiltyCheck),
+        isBiltyDuplicate(dupeCheckCandidate, s.biltyNumber || ""),
     );
     if (alreadySaved) {
-      showNotification(
-        `Base bilty ${baseBiltyCheck} is already fully processed in Inward Saved!`,
-        "error",
-      );
+      showNotification(`Bilty ${bNo} is already in Inward Saved!`, "error");
       return;
     }
-    // Check if delivered via Delivery tab
-    const isDelivered =
-      (deliveredBilties || []).includes(bNo.toLowerCase()) ||
-      (deliveredBilties || []).some(
-        (db) =>
-          db.replace(/X\d+\(\d+\)$/i, "").toLowerCase() === baseBiltyCheck,
-      );
+    // Check if delivered via Delivery tab (exact match only — deliveredBilties store full labels)
+    const isDelivered = (deliveredBilties || []).some((db) =>
+      isBiltyDuplicate(dupeCheckCandidate, db),
+    );
     if (isDelivered) {
       showNotification(
         "This bilty was already delivered to a customer via the Delivery tab.",
@@ -323,20 +403,20 @@ function InwardTab({
       );
       return;
     }
-    // Check X-count consistency: if any bale of this base bilty exists with a different X-count, block it
+    // Check X-count consistency using isBiltyDuplicate (Rule 3: same base, different count = block)
     const existingInward = transactions.find(
       (t) =>
         t.type === "INWARD" &&
         (!t.businessId || t.businessId === activeBusinessId) &&
-        (t.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-          baseBiltyCheck,
+        isBiltyDuplicate(dupeCheckCandidate, t.biltyNo || ""),
     );
     if (existingInward) {
       const existingXMatch = (existingInward.biltyNo || "").match(
         /X(\d+)\(\d+\)$/i,
       );
-      const newXMatch = bNo.match(/X(\d+)/i);
+      const newXMatch = dupeCheckCandidate.match(/X(\d+)/i);
       if (existingXMatch && newXMatch && existingXMatch[1] !== newXMatch[1]) {
+        const baseBiltyCheck = bNo.replace(/X\d+\(\d+\)$/i, "");
         showNotification(
           `This bilty has ${existingXMatch[1]} packages. You can only open remaining bales of ${baseBiltyCheck}X${existingXMatch[1]}.`,
           "error",
@@ -396,21 +476,43 @@ function InwardTab({
   useEffect(() => {
     if (!openingParcel) return;
     const biltyStr = openingParcel.biltyNo || "";
-    const dashIdx = biltyStr.lastIndexOf("-");
+
+    // FIX: Parse queue bilty to extract base bilty, totalPkgs, currentPkg
+    // Pattern: "sola-1211X10(3)" → baseBilty="sola-1211", totalPkgs=10, currentPkg=3
+    const queuePattern = /^(.+?)X(\d+)\((\d+)\)$/;
+    const queueMatch = biltyStr.match(queuePattern);
+
+    let resolvedBiltyStr = biltyStr;
+    let resolvedTotalPkgs = (openingParcel as PendingParcel).packages || "1";
+    let resolvedCurrentPkg = 1;
+
+    if (queueMatch) {
+      // Has X{N}({M}) pattern — extract components
+      const baseBilty = queueMatch[1]; // "sola-1211"
+      const totalPkgs = queueMatch[2]; // "10"
+      const currentPkg = Number(queueMatch[3]); // 3
+      resolvedBiltyStr = baseBilty;
+      resolvedTotalPkgs = totalPkgs;
+      resolvedCurrentPkg = currentPkg;
+    }
+
+    // Set prefix and number from the resolved (base) bilty string
+    const dashIdx = resolvedBiltyStr.lastIndexOf("-");
     if (dashIdx > 0) {
-      const prefix = biltyStr.slice(0, dashIdx);
-      const num = biltyStr.slice(dashIdx + 1);
+      const prefix = resolvedBiltyStr.slice(0, dashIdx);
+      const num = resolvedBiltyStr.slice(dashIdx + 1);
       if (biltyPrefixes.includes(prefix)) {
         setBiltyPrefix(prefix);
         setBiltyNumber(num);
       } else {
         setBiltyPrefix("0");
-        setBiltyNumber(biltyStr);
+        setBiltyNumber(resolvedBiltyStr);
       }
     } else {
       setBiltyPrefix("0");
-      setBiltyNumber(biltyStr);
+      setBiltyNumber(resolvedBiltyStr);
     }
+
     setMatchedDetails(openingParcel as unknown as PendingParcel);
     setBiltyLocked(true);
     setItemForm((prev) => ({
@@ -422,10 +524,20 @@ function InwardTab({
         prev.category,
     }));
     setQueueBiltySearch(biltyStr);
-    const pkgs = (openingParcel as PendingParcel).packages;
-    if (pkgs && Number(pkgs) > 1) {
-      setInwardPackages(pkgs);
+
+    // Set package count from parsed total (or packages field as fallback)
+    const pkgCount = Number(resolvedTotalPkgs) || 1;
+    if (pkgCount > 1) {
+      setInwardPackages(String(pkgCount));
       setPackagesAutoLocked(true);
+    }
+
+    // Store the target package slot to auto-navigate to after perBaleData renders
+    if (resolvedCurrentPkg > 1) {
+      // Use a small timeout to let perBaleData useEffect fire first
+      setTimeout(() => {
+        setActiveBaleIdx(resolvedCurrentPkg - 1);
+      }, 50);
     }
   }, [openingParcel]);
 
@@ -467,22 +579,73 @@ function InwardTab({
       return;
     }
 
-    // Check duplicate INWARD bilty
+    // Check duplicate INWARD bilty (4-rule check)
     if (!isDirectEntry) {
       const bNo =
         biltyPrefix === "0" ? biltyNumber : `${biltyPrefix}-${biltyNumber}`;
-      const alreadyProcessed = transactions.some(
-        (tx) =>
-          tx.type === "INWARD" &&
-          (!tx.businessId || tx.businessId === activeBusinessId) &&
-          tx.biltyNo?.toLowerCase() === bNo.toLowerCase(),
-      );
-      if (alreadyProcessed) {
+      // Rule 4: block if user typed a suffixed string as a base bilty
+      // (skip this check when opening from queue — openingParcel means the full string is valid)
+      if (!openingParcel && hasBiltyPackageSuffix(biltyNumber)) {
         showNotification(
-          `Bilty ${bNo} has already been processed in Inward!`,
+          "Bilty number cannot contain a package suffix — enter only the base number",
           "error",
         );
         return;
+      }
+      const pkgCountAtSave = Number(inwardPackages) || 1;
+
+      if (pkgCountAtSave > 1 && perBaleData.length > 0) {
+        // Per-bale slot validation: check each slot label individually using 4-rule logic.
+        // This correctly allows siblings (same base + same count + different idx) through
+        // while blocking true duplicates (same base + same count + same idx).
+        for (const bale of perBaleData) {
+          if (bale.locked) continue; // already saved — skip
+          if (!bale.received) continue; // not received — skip
+          const slotLabel = bale.label;
+          // Check against existing INWARD transactions
+          const txDupe = transactions.find(
+            (tx) =>
+              tx.type === "INWARD" &&
+              (!tx.businessId || tx.businessId === activeBusinessId) &&
+              isBiltyDuplicate(slotLabel, tx.biltyNo || ""),
+          );
+          if (txDupe) {
+            showNotification(
+              `Bale ${slotLabel} has already been processed in Inward!`,
+              "error",
+            );
+            return;
+          }
+          // Check against queue (pendingParcels)
+          const queueDupe = (pendingParcels || []).find(
+            (p) =>
+              (!p.businessId || p.businessId === activeBusinessId) &&
+              isBiltyDuplicate(slotLabel, p.biltyNo || ""),
+          );
+          if (queueDupe) {
+            showNotification(
+              `Bale ${slotLabel} already exists in the Arrival Queue!`,
+              "error",
+            );
+            return;
+          }
+        }
+      } else {
+        // Single-package path: use the bilty number directly as check candidate
+        const dupeCheckCandidate = bNo;
+        const alreadyProcessed = transactions.some(
+          (tx) =>
+            tx.type === "INWARD" &&
+            (!tx.businessId || tx.businessId === activeBusinessId) &&
+            isBiltyDuplicate(dupeCheckCandidate, tx.biltyNo || ""),
+        );
+        if (alreadyProcessed) {
+          showNotification(
+            `Bilty ${bNo} has already been processed in Inward!`,
+            "error",
+          );
+          return;
+        }
       }
     }
     // Validate totalQty if set
@@ -512,22 +675,30 @@ function InwardTab({
           inv.itemName.toLowerCase() === item.itemName.toLowerCase(),
       );
     });
+    // Bug fix: capture all form state NOW before any async confirm dialog
+    // so doFinalSave always has valid data even after form is cleared
+    const savedBaleItems = [...baleItems];
+    const savedBNo = isDirectEntry
+      ? `DIRECT-${directReference || Date.now().toString().slice(-4)}`
+      : biltyPrefix === "0"
+        ? biltyNumber
+        : `${biltyPrefix}-${biltyNumber}`;
+    const savedType = isDirectEntry ? "DIRECT_STOCK" : "INWARD";
+    const savedMatchedDetails = matchedDetails;
+    const savedIsDirectEntry = isDirectEntry;
+    const savedTotalQty = totalQty;
+
     const doFinalSave = () => {
-      for (const item of baleItems) {
-        if (Number(item.shopQty) > 0)
-          updateStock(
-            item.sku,
-            {
-              ...item,
-              saleRate: Number(item.saleRate),
-              purchaseRate: Number(item.purchaseRate),
-            },
-            Number(item.shopQty),
-            0,
-            "Main Godown",
-          );
-        for (const [g, q] of Object.entries(item.godownQuants)) {
-          if (Number(q) > 0)
+      const txId = Date.now();
+      const inwardSavedId = txId + 1; // Bug 4 fix: avoid same-tick ID collision
+
+      // Inventory update — use batch path if available (1 backend call, 1 index rebuild)
+      // Falls back to the original per-item updateStock loop if prop is not provided
+      if (batchUpdateStockForInward) {
+        batchUpdateStockForInward(savedBaleItems);
+      } else {
+        for (const item of savedBaleItems) {
+          if (Number(item.shopQty) > 0)
             updateStock(
               item.sku,
               {
@@ -535,13 +706,158 @@ function InwardTab({
                 saleRate: Number(item.saleRate),
                 purchaseRate: Number(item.purchaseRate),
               },
+              Number(item.shopQty),
               0,
-              Number(q),
-              g,
+              "Main Godown",
             );
+          for (const [g, q] of Object.entries(item.godownQuants)) {
+            if (Number(q) > 0)
+              updateStock(
+                item.sku,
+                {
+                  ...item,
+                  saleRate: Number(item.saleRate),
+                  purchaseRate: Number(item.purchaseRate),
+                },
+                0,
+                Number(q),
+                g,
+              );
+          }
         }
       }
+
+      // Write transaction to history
+      setTransactions((prev) => [
+        {
+          id: txId,
+          type: savedType,
+          biltyNo: savedBNo,
+          businessId: activeBusinessId,
+          date: new Date().toISOString().split("T")[0],
+          user: currentUser.username,
+          transportName: savedIsDirectEntry
+            ? "Direct Entry"
+            : (savedMatchedDetails as TransitRecord)?.transportName || "",
+          itemsCount: savedTotalQty
+            ? Number(savedTotalQty)
+            : savedBaleItems.reduce(
+                (sum, i) =>
+                  sum +
+                  (Number(i.shopQty) || 0) +
+                  Object.values(i.godownQuants).reduce(
+                    (a, b) => a + Number(b || 0),
+                    0,
+                  ),
+                0,
+              ),
+          totalQtyInBale: savedTotalQty ? Number(savedTotalQty) : undefined,
+          baleItemsList: savedBaleItems.map((i) => ({
+            itemName: i.itemName,
+            category: i.category,
+            attributes: { ...i.attributes },
+            shopQty: Number(i.shopQty) || 0,
+            godownQuants: Object.fromEntries(
+              Object.entries(i.godownQuants).map(([g, q]) => [
+                g,
+                Number(q) || 0,
+              ]),
+            ),
+            saleRate: Number(i.saleRate) || 0,
+            purchaseRate: Number(i.purchaseRate) || 0,
+            qty:
+              (Number(i.shopQty) || 0) +
+              Object.values(i.godownQuants).reduce(
+                (a, b) => a + Number(b || 0),
+                0,
+              ),
+          })),
+        },
+        ...prev,
+      ]);
+
+      // Remove from transit/queue if normal inward
+      if (!savedIsDirectEntry) {
+        if (savedMatchedDetails) {
+          setTransitGoods((prev) =>
+            prev.filter((g) => g.id !== savedMatchedDetails.id),
+          );
+          setPendingParcels((prev) =>
+            prev.filter((p) => p.id !== savedMatchedDetails.id),
+          );
+        } else {
+          setTransitGoods((prev) =>
+            prev.filter(
+              (g) => g.biltyNo?.toLowerCase() !== savedBNo.toLowerCase(),
+            ),
+          );
+          setPendingParcels((prev) =>
+            prev.filter(
+              (p) => p.biltyNo?.toLowerCase() !== savedBNo.toLowerCase(),
+            ),
+          );
+        }
+      }
+
+      // Save to inwardSaved — Bug 3 fix: godownBreakdown derived from same godownQuants source as baleItemsList.godownQuants
+      if (setInwardSaved) {
+        setInwardSaved((prev) => [
+          {
+            id: inwardSavedId,
+            biltyNumber: savedBNo,
+            baseNumber: savedBNo.replace(/X\d+\(\d+\)$/i, ""),
+            packages: "1",
+            items: savedBaleItems.map((i) => {
+              const godownBreakdown = Object.fromEntries(
+                Object.entries(i.godownQuants).map(([k, v]) => [
+                  k,
+                  Number(v) || 0,
+                ]),
+              );
+              const godownQty = Object.values(godownBreakdown).reduce(
+                (a, b) => a + b,
+                0,
+              );
+              return {
+                category: i.category,
+                itemName: i.itemName,
+                qty: (Number(i.shopQty) || 0) + godownQty,
+                shopQty: Number(i.shopQty) || 0,
+                godownQty,
+                godownBreakdown,
+                saleRate: Number(i.saleRate) || 0,
+                purchaseRate: Number(i.purchaseRate) || 0,
+                attributes: i.attributes || {},
+              };
+            }),
+            savedBy: currentUser.username,
+            savedAt: new Date().toISOString(),
+            transporter:
+              (savedMatchedDetails as TransitRecord)?.transportName || "",
+            supplier:
+              (savedMatchedDetails as TransitRecord)?.supplierName ||
+              (savedMatchedDetails as PendingParcel)?.supplier ||
+              "",
+            businessId: activeBusinessId,
+          },
+          ...prev,
+        ]);
+      }
+
+      // Clear form AFTER all writes
+      setBaleItems([]);
+      setBiltyNumber("");
+      setMatchedDetails(null);
+      setBiltyLocked(false);
+      setOpeningParcel(null);
+      setDirectReference("");
+      showNotification(
+        savedIsDirectEntry
+          ? "Direct Stock Saved"
+          : "Inward Processed & Removed from Queues",
+      );
     };
+
     if (newItemsToCreate.length > 0) {
       const names = newItemsToCreate
         .map((i) => `${i.itemName} (${i.category})`)
@@ -556,128 +872,6 @@ ${names}`,
     } else {
       doFinalSave();
     }
-    const bNo = isDirectEntry
-      ? `DIRECT-${directReference || Date.now().toString().slice(-4)}`
-      : biltyPrefix === "0"
-        ? biltyNumber
-        : `${biltyPrefix}-${biltyNumber}`;
-    const type = isDirectEntry ? "DIRECT_STOCK" : "INWARD";
-    setTransactions((prev) => [
-      {
-        id: Date.now(),
-        type,
-        biltyNo: bNo,
-        businessId: activeBusinessId,
-        date: new Date().toISOString().split("T")[0],
-        user: currentUser.username,
-        transportName: isDirectEntry
-          ? "Direct Entry"
-          : (matchedDetails as TransitRecord)?.transportName || "",
-        itemsCount: totalQty
-          ? Number(totalQty)
-          : baleItems.reduce(
-              (sum, i) =>
-                sum +
-                (Number(i.shopQty) || 0) +
-                Object.values(i.godownQuants).reduce(
-                  (a, b) => a + Number(b || 0),
-                  0,
-                ),
-              0,
-            ),
-        totalQtyInBale: totalQty ? Number(totalQty) : undefined,
-        baleItemsList: baleItems.map((i) => ({
-          itemName: i.itemName,
-          category: i.category,
-          attributes: { ...i.attributes },
-          shopQty: Number(i.shopQty) || 0,
-          godownQuants: Object.fromEntries(
-            Object.entries(i.godownQuants).map(([g, q]) => [g, Number(q) || 0]),
-          ),
-          saleRate: Number(i.saleRate) || 0,
-          purchaseRate: Number(i.purchaseRate) || 0,
-          qty:
-            (Number(i.shopQty) || 0) +
-            Object.values(i.godownQuants).reduce(
-              (a, b) => a + Number(b || 0),
-              0,
-            ),
-        })),
-      },
-      ...prev,
-    ]);
-    if (!isDirectEntry) {
-      if (matchedDetails) {
-        setTransitGoods((prev) =>
-          prev.filter((g) => g.id !== matchedDetails.id),
-        );
-        setPendingParcels((prev) =>
-          prev.filter((p) => p.id !== matchedDetails.id),
-        );
-      } else {
-        setTransitGoods((prev) =>
-          prev.filter((g) => g.biltyNo?.toLowerCase() !== bNo.toLowerCase()),
-        );
-        setPendingParcels((prev) =>
-          prev.filter((p) => p.biltyNo?.toLowerCase() !== bNo.toLowerCase()),
-        );
-      }
-    }
-    // Save to inwardSaved for ALL entry types (direct + normal)
-    if (setInwardSaved) {
-      setInwardSaved((prev) => [
-        {
-          id: Date.now(),
-          biltyNumber: bNo,
-          baseNumber: bNo.replace(/X\d+\(\d+\)$/i, ""),
-          packages: "1",
-          items: baleItems.map((i) => ({
-            category: i.category,
-            itemName: i.itemName,
-            qty:
-              (Number(i.shopQty) || 0) +
-              Object.values(i.godownQuants).reduce(
-                (a, b) => a + Number(b || 0),
-                0,
-              ),
-            shopQty: Number(i.shopQty) || 0,
-            godownQty: Object.values(i.godownQuants).reduce(
-              (a, b) => a + Number(b || 0),
-              0,
-            ),
-            godownBreakdown: Object.fromEntries(
-              Object.entries(i.godownQuants).map(([k, v]) => [
-                k,
-                Number(v) || 0,
-              ]),
-            ),
-            saleRate: Number(i.saleRate) || 0,
-            purchaseRate: Number(i.purchaseRate) || 0,
-            attributes: i.attributes || {},
-          })),
-          savedBy: currentUser.username,
-          savedAt: new Date().toISOString(),
-          transporter: (matchedDetails as TransitRecord)?.transportName || "",
-          supplier:
-            (matchedDetails as TransitRecord)?.supplierName ||
-            (matchedDetails as PendingParcel)?.supplier ||
-            "",
-          businessId: activeBusinessId,
-        },
-        ...prev,
-      ]);
-    }
-    setBaleItems([]);
-    setBiltyNumber("");
-    setMatchedDetails(null);
-    setBiltyLocked(false);
-    setOpeningParcel(null);
-    setDirectReference("");
-    showNotification(
-      isDirectEntry
-        ? "Direct Stock Saved"
-        : "Inward Processed & Removed from Queues",
-    );
   };
 
   const addItemToBale = (e: React.FormEvent) => {
@@ -824,7 +1018,13 @@ ${names}`,
                         setQueueBiltySearch(p.biltyNo);
                         setShowQueueDropdown(false);
                         setOpeningParcel(p);
-                        const parts = p.biltyNo.split("-");
+                        // FIX: Parse queue bilty to get base bilty for prefix/number split
+                        const queuePat = /^(.+?)X(\d+)\((\d+)\)$/;
+                        const queueM = p.biltyNo.match(queuePat);
+                        const baseBiltyForDropdown = queueM
+                          ? queueM[1]
+                          : p.biltyNo;
+                        const parts = baseBiltyForDropdown.split("-");
                         if (parts.length >= 2) {
                           const prefix = parts.slice(0, -1).join("-");
                           const num = parts[parts.length - 1];
@@ -833,11 +1033,11 @@ ${names}`,
                             setBiltyNumber(num);
                           } else {
                             setBiltyPrefix("0");
-                            setBiltyNumber(p.biltyNo);
+                            setBiltyNumber(baseBiltyForDropdown);
                           }
                         } else {
                           setBiltyPrefix("0");
-                          setBiltyNumber(p.biltyNo);
+                          setBiltyNumber(baseBiltyForDropdown);
                         }
                         setItemForm((prev) => ({
                           ...prev,
@@ -845,7 +1045,20 @@ ${names}`,
                             p.itemCategory || p.category || prev.category || "",
                           itemName: p.itemName || prev.itemName || "",
                         }));
-                        if (p.packages && Number(p.packages) > 1) {
+                        if (queueM) {
+                          const totalPkgs = Number(queueM[2]);
+                          const currentPkg = Number(queueM[3]);
+                          if (totalPkgs > 1) {
+                            setInwardPackages(String(totalPkgs));
+                            setPackagesAutoLocked(true);
+                          }
+                          if (currentPkg > 1) {
+                            setTimeout(
+                              () => setActiveBaleIdx(currentPkg - 1),
+                              50,
+                            );
+                          }
+                        } else if (p.packages && Number(p.packages) > 1) {
                           setInwardPackages(p.packages);
                           setPackagesAutoLocked(true);
                         }
@@ -1911,24 +2124,28 @@ ${names}`,
                             biltyNumber: bale.label,
                             baseNumber: bale.label.replace(/X\d+\(\d+\)$/i, ""),
                             packages: inwardPackages,
-                            items: bale.items.map((i) => ({
-                              category: i.category,
-                              itemName: i.itemName,
-                              qty:
-                                (Number(i.shopQty) || 0) +
-                                Object.values(i.godownQuants).reduce(
-                                  (a, b) => a + Number(b || 0),
-                                  0,
-                                ),
-                              shopQty: Number(i.shopQty) || 0,
-                              godownQty: Object.values(i.godownQuants).reduce(
-                                (a, b) => a + Number(b || 0),
-                                0,
-                              ),
-                              saleRate: Number(i.saleRate) || 0,
-                              purchaseRate: Number(i.purchaseRate) || 0,
-                              attributes: i.attributes || {},
-                            })),
+                            items: bale.items.map((i) => {
+                              const godownBreakdown = Object.fromEntries(
+                                Object.entries(i.godownQuants).map(([k, v]) => [
+                                  k,
+                                  Number(v) || 0,
+                                ]),
+                              );
+                              const godownQty = Object.values(
+                                godownBreakdown,
+                              ).reduce((a, b) => a + b, 0);
+                              return {
+                                category: i.category,
+                                itemName: i.itemName,
+                                qty: (Number(i.shopQty) || 0) + godownQty,
+                                shopQty: Number(i.shopQty) || 0,
+                                godownQty,
+                                godownBreakdown,
+                                saleRate: Number(i.saleRate) || 0,
+                                purchaseRate: Number(i.purchaseRate) || 0,
+                                attributes: i.attributes || {},
+                              };
+                            }),
                             savedBy: currentUser.username,
                             savedAt: new Date().toISOString(),
                             transporter:

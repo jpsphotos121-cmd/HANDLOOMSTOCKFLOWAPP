@@ -122,19 +122,6 @@ export const UserRole = IDL.Variant({
   'user' : IDL.Null,
   'guest' : IDL.Null,
 });
-export const BiltyPrefix = IDL.Record({ 'id' : IDL.Text, 'prefix' : IDL.Text });
-export const Business = IDL.Record({ 'id' : IDL.Text, 'name' : IDL.Text });
-export const Category = IDL.Record({
-  'id' : IDL.Text,
-  'name' : IDL.Text,
-  'subCategories' : IDL.Vec(SubCategory),
-  'businessId' : IDL.Text,
-});
-export const Godown = IDL.Record({
-  'id' : IDL.Text,
-  'businessId' : IDL.Text,
-  'name' : IDL.Text,
-});
 export const InwardItem = IDL.Record({
   'subCategory' : IDL.Text,
   'purchaseRate' : IDL.Float64,
@@ -144,6 +131,23 @@ export const InwardItem = IDL.Record({
   'itemName' : IDL.Text,
   'category' : IDL.Text,
   'saleRate' : IDL.Float64,
+});
+export const BiltyPrefix = IDL.Record({
+  'id' : IDL.Text,
+  'businessId' : IDL.Text,
+  'prefix' : IDL.Text,
+});
+export const Business = IDL.Record({ 'id' : IDL.Text, 'name' : IDL.Text });
+export const CategoryV2 = IDL.Record({
+  'id' : IDL.Text,
+  'businessId' : IDL.Text,
+  'name' : IDL.Text,
+  'subCategories' : IDL.Vec(SubCategory),
+});
+export const Godown = IDL.Record({
+  'id' : IDL.Text,
+  'businessId' : IDL.Text,
+  'name' : IDL.Text,
 });
 export const InwardSavedEntry = IDL.Record({
   'id' : IDL.Text,
@@ -186,11 +190,10 @@ export const User = IDL.Record({
 export const LoginResult = IDL.Variant({ 'ok' : User, 'err' : IDL.Text });
 
 export const idlService = IDL.Service({
-  '_initializeAccessControlWithSecret' : IDL.Func([IDL.Text], [], []),
-  'addBiltyPrefix' : IDL.Func([IDL.Text, IDL.Text], [], []),
+  '_initializeAccessControl' : IDL.Func([], [], []),
+  'addBiltyPrefix' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
   'addBusiness' : IDL.Func([IDL.Text, IDL.Text], [], []),
   'addCategory' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
-  'getCategoriesByBusiness' : IDL.Func([IDL.Text], [IDL.Vec(Category)], ['query']),
   'addDelivery' : IDL.Func([DeliveryEntry], [IDL.Text], []),
   'addGodown' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
   'addInventoryItem' : IDL.Func([InventoryItem], [], []),
@@ -206,34 +209,57 @@ export const idlService = IDL.Service({
       [],
     ),
   'assignCallerUserRole' : IDL.Func([IDL.Principal, UserRole], [], []),
-  'biltyExists' : IDL.Func([IDL.Text], [IDL.Bool], []),
+  'batchAddInventoryItems' : IDL.Func([IDL.Vec(InventoryItem)], [], []),
+  'batchSaveInwardItems' : IDL.Func([IDL.Text, IDL.Vec(InwardItem)], [], []),
+  'biltyExists' : IDL.Func([IDL.Text], [IDL.Bool], ['query']),
   'deleteBiltyPrefix' : IDL.Func([IDL.Text], [], []),
   'deleteBusiness' : IDL.Func([IDL.Text], [], []),
   'deleteCategory' : IDL.Func([IDL.Text, IDL.Text], [], []),
   'deleteCategoryGlobal' : IDL.Func([IDL.Text], [], []),
+  'deleteDelivery' : IDL.Func([IDL.Text], [], []),
   'deleteGodown' : IDL.Func([IDL.Text], [], []),
   'deleteInventoryItem' : IDL.Func([IDL.Text], [], []),
   'deleteInwardSaved' : IDL.Func([IDL.Text], [], []),
   'deleteQueueEntry' : IDL.Func([IDL.Text], [], []),
+  'deleteSale' : IDL.Func([IDL.Text], [], []),
   'deleteSubCategory' : IDL.Func([IDL.Text, IDL.Text], [], []),
   'deleteTransitEntry' : IDL.Func([IDL.Text], [], []),
   'deleteTransportTracker' : IDL.Func([IDL.Text], [], []),
   'deleteTxRecord' : IDL.Func([IDL.Text], [], []),
   'deleteUser' : IDL.Func([IDL.Text], [], []),
+  'getAppSettings' : IDL.Func([], [IDL.Text], ['query']),
   'getBiltyPrefixes' : IDL.Func([], [IDL.Vec(BiltyPrefix)], ['query']),
+  'getBiltyPrefixesByBusiness' : IDL.Func(
+      [IDL.Text],
+      [IDL.Vec(BiltyPrefix)],
+      ['query'],
+    ),
   'getBusinesses' : IDL.Func([], [IDL.Vec(Business)], ['query']),
   'getCallerUserRole' : IDL.Func([], [UserRole], ['query']),
-  'getCategories' : IDL.Func([], [IDL.Vec(Category)], ['query']),
+  'getCategories' : IDL.Func([], [IDL.Vec(CategoryV2)], ['query']),
+  'getCategoriesByBusiness' : IDL.Func(
+      [IDL.Text],
+      [IDL.Vec(CategoryV2)],
+      ['query'],
+    ),
   'getCurrentUser' : IDL.Func([], [IDL.Text], []),
   'getDeliveries' : IDL.Func([IDL.Text], [IDL.Vec(DeliveryEntry)], ['query']),
   'getGodowns' : IDL.Func([], [IDL.Vec(Godown)], ['query']),
   'getGodownsByBusiness' : IDL.Func([IDL.Text], [IDL.Vec(Godown)], ['query']),
   'getInventory' : IDL.Func([IDL.Text], [IDL.Vec(InventoryItem)], ['query']),
-  'getInwardSaved' : IDL.Func([IDL.Text], [IDL.Vec(InwardSavedEntry)], ['query']),
+  'getInwardSaved' : IDL.Func(
+      [IDL.Text],
+      [IDL.Vec(InwardSavedEntry)],
+      ['query'],
+    ),
   'getQueueEntries' : IDL.Func([IDL.Text], [IDL.Vec(QueueEntry)], ['query']),
   'getSales' : IDL.Func([IDL.Text], [IDL.Vec(SaleEntry)], ['query']),
   'getTransfers' : IDL.Func([IDL.Text], [IDL.Vec(TransferEntry)], ['query']),
-  'getTransitEntries' : IDL.Func([IDL.Text], [IDL.Vec(TransitEntry)], ['query']),
+  'getTransitEntries' : IDL.Func(
+      [IDL.Text],
+      [IDL.Vec(TransitEntry)],
+      ['query'],
+    ),
   'getTransportTrackers' : IDL.Func([], [IDL.Vec(TransportTracker)], ['query']),
   'getTxHistory' : IDL.Func([IDL.Text], [IDL.Vec(TxRecord)], ['query']),
   'getUsers' : IDL.Func([], [IDL.Vec(User)], ['query']),
@@ -241,9 +267,12 @@ export const idlService = IDL.Service({
   'login' : IDL.Func([IDL.Text, IDL.Text], [LoginResult], []),
   'markQueueDelivered' : IDL.Func([IDL.Text], [], []),
   'postTransfer' : IDL.Func([TransferEntry], [IDL.Text], []),
-  'saveInward' : IDL.Func([InwardSavedEntry], [], []),
+  'restoreDelivery' : IDL.Func([DeliveryEntry], [], []),
+  'restoreInward' : IDL.Func([InwardSavedEntry], [], []),
+  'restoreQueueEntry' : IDL.Func([QueueEntry], [], []),
+  'restoreSale' : IDL.Func([SaleEntry], [], []),
   'saveAppSettings' : IDL.Func([IDL.Text], [], []),
-  'getAppSettings' : IDL.Func([], [IDL.Text], ['query']),
+  'saveInward' : IDL.Func([InwardSavedEntry], [], []),
   'updateBusiness' : IDL.Func([IDL.Text, IDL.Text], [], []),
   'updateCategory' : IDL.Func([IDL.Text, IDL.Text], [], []),
   'updateGodown' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
@@ -377,18 +406,6 @@ export const idlFactory = ({ IDL }) => {
     'user' : IDL.Null,
     'guest' : IDL.Null,
   });
-  const BiltyPrefix = IDL.Record({ 'id' : IDL.Text, 'prefix' : IDL.Text });
-  const Business = IDL.Record({ 'id' : IDL.Text, 'name' : IDL.Text });
-  const Category = IDL.Record({
-    'id' : IDL.Text,
-    'name' : IDL.Text,
-    'subCategories' : IDL.Vec(SubCategory),
-  });
-  const Godown = IDL.Record({
-    'id' : IDL.Text,
-    'businessId' : IDL.Text,
-    'name' : IDL.Text,
-  });
   const InwardItem = IDL.Record({
     'subCategory' : IDL.Text,
     'purchaseRate' : IDL.Float64,
@@ -398,6 +415,23 @@ export const idlFactory = ({ IDL }) => {
     'itemName' : IDL.Text,
     'category' : IDL.Text,
     'saleRate' : IDL.Float64,
+  });
+  const BiltyPrefix = IDL.Record({
+    'id' : IDL.Text,
+    'businessId' : IDL.Text,
+    'prefix' : IDL.Text,
+  });
+  const Business = IDL.Record({ 'id' : IDL.Text, 'name' : IDL.Text });
+  const CategoryV2 = IDL.Record({
+    'id' : IDL.Text,
+    'businessId' : IDL.Text,
+    'name' : IDL.Text,
+    'subCategories' : IDL.Vec(SubCategory),
+  });
+  const Godown = IDL.Record({
+    'id' : IDL.Text,
+    'businessId' : IDL.Text,
+    'name' : IDL.Text,
   });
   const InwardSavedEntry = IDL.Record({
     'id' : IDL.Text,
@@ -440,11 +474,10 @@ export const idlFactory = ({ IDL }) => {
   const LoginResult = IDL.Variant({ 'ok' : User, 'err' : IDL.Text });
   
   return IDL.Service({
-    '_initializeAccessControlWithSecret' : IDL.Func([IDL.Text], [], []),
-    'addBiltyPrefix' : IDL.Func([IDL.Text, IDL.Text], [], []),
+    '_initializeAccessControl' : IDL.Func([], [], []),
+    'addBiltyPrefix' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
     'addBusiness' : IDL.Func([IDL.Text, IDL.Text], [], []),
     'addCategory' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
-  'getCategoriesByBusiness' : IDL.Func([IDL.Text], [IDL.Vec(Category)], ['query']),
     'addDelivery' : IDL.Func([DeliveryEntry], [IDL.Text], []),
     'addGodown' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),
     'addInventoryItem' : IDL.Func([InventoryItem], [], []),
@@ -460,44 +493,74 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'assignCallerUserRole' : IDL.Func([IDL.Principal, UserRole], [], []),
-    'biltyExists' : IDL.Func([IDL.Text], [IDL.Bool], []),
+    'batchAddInventoryItems' : IDL.Func([IDL.Vec(InventoryItem)], [], []),
+    'batchSaveInwardItems' : IDL.Func([IDL.Text, IDL.Vec(InwardItem)], [], []),
+    'biltyExists' : IDL.Func([IDL.Text], [IDL.Bool], ['query']),
     'deleteBiltyPrefix' : IDL.Func([IDL.Text], [], []),
     'deleteBusiness' : IDL.Func([IDL.Text], [], []),
     'deleteCategory' : IDL.Func([IDL.Text, IDL.Text], [], []),
-  'deleteCategoryGlobal' : IDL.Func([IDL.Text], [], []),
+    'deleteCategoryGlobal' : IDL.Func([IDL.Text], [], []),
+    'deleteDelivery' : IDL.Func([IDL.Text], [], []),
     'deleteGodown' : IDL.Func([IDL.Text], [], []),
     'deleteInventoryItem' : IDL.Func([IDL.Text], [], []),
     'deleteInwardSaved' : IDL.Func([IDL.Text], [], []),
     'deleteQueueEntry' : IDL.Func([IDL.Text], [], []),
+    'deleteSale' : IDL.Func([IDL.Text], [], []),
     'deleteSubCategory' : IDL.Func([IDL.Text, IDL.Text], [], []),
     'deleteTransitEntry' : IDL.Func([IDL.Text], [], []),
     'deleteTransportTracker' : IDL.Func([IDL.Text], [], []),
     'deleteTxRecord' : IDL.Func([IDL.Text], [], []),
     'deleteUser' : IDL.Func([IDL.Text], [], []),
+    'getAppSettings' : IDL.Func([], [IDL.Text], ['query']),
     'getBiltyPrefixes' : IDL.Func([], [IDL.Vec(BiltyPrefix)], ['query']),
+    'getBiltyPrefixesByBusiness' : IDL.Func(
+        [IDL.Text],
+        [IDL.Vec(BiltyPrefix)],
+        ['query'],
+      ),
     'getBusinesses' : IDL.Func([], [IDL.Vec(Business)], ['query']),
     'getCallerUserRole' : IDL.Func([], [UserRole], ['query']),
-    'getCategories' : IDL.Func([], [IDL.Vec(Category)], ['query']),
+    'getCategories' : IDL.Func([], [IDL.Vec(CategoryV2)], ['query']),
+    'getCategoriesByBusiness' : IDL.Func(
+        [IDL.Text],
+        [IDL.Vec(CategoryV2)],
+        ['query'],
+      ),
     'getCurrentUser' : IDL.Func([], [IDL.Text], []),
     'getDeliveries' : IDL.Func([IDL.Text], [IDL.Vec(DeliveryEntry)], ['query']),
     'getGodowns' : IDL.Func([], [IDL.Vec(Godown)], ['query']),
     'getGodownsByBusiness' : IDL.Func([IDL.Text], [IDL.Vec(Godown)], ['query']),
     'getInventory' : IDL.Func([IDL.Text], [IDL.Vec(InventoryItem)], ['query']),
-    'getInwardSaved' : IDL.Func([IDL.Text], [IDL.Vec(InwardSavedEntry)], ['query']),
+    'getInwardSaved' : IDL.Func(
+        [IDL.Text],
+        [IDL.Vec(InwardSavedEntry)],
+        ['query'],
+      ),
     'getQueueEntries' : IDL.Func([IDL.Text], [IDL.Vec(QueueEntry)], ['query']),
     'getSales' : IDL.Func([IDL.Text], [IDL.Vec(SaleEntry)], ['query']),
     'getTransfers' : IDL.Func([IDL.Text], [IDL.Vec(TransferEntry)], ['query']),
-    'getTransitEntries' : IDL.Func([IDL.Text], [IDL.Vec(TransitEntry)], ['query']),
-    'getTransportTrackers' : IDL.Func([], [IDL.Vec(TransportTracker)], ['query']),
+    'getTransitEntries' : IDL.Func(
+        [IDL.Text],
+        [IDL.Vec(TransitEntry)],
+        ['query'],
+      ),
+    'getTransportTrackers' : IDL.Func(
+        [],
+        [IDL.Vec(TransportTracker)],
+        ['query'],
+      ),
     'getTxHistory' : IDL.Func([IDL.Text], [IDL.Vec(TxRecord)], ['query']),
     'getUsers' : IDL.Func([], [IDL.Vec(User)], ['query']),
     'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
     'login' : IDL.Func([IDL.Text, IDL.Text], [LoginResult], []),
     'markQueueDelivered' : IDL.Func([IDL.Text], [], []),
     'postTransfer' : IDL.Func([TransferEntry], [IDL.Text], []),
-    'saveInward' : IDL.Func([InwardSavedEntry], [], []),
+    'restoreDelivery' : IDL.Func([DeliveryEntry], [], []),
+    'restoreInward' : IDL.Func([InwardSavedEntry], [], []),
+    'restoreQueueEntry' : IDL.Func([QueueEntry], [], []),
+    'restoreSale' : IDL.Func([SaleEntry], [], []),
     'saveAppSettings' : IDL.Func([IDL.Text], [], []),
-    'getAppSettings' : IDL.Func([], [IDL.Text], ['query']),
+    'saveInward' : IDL.Func([InwardSavedEntry], [], []),
     'updateBusiness' : IDL.Func([IDL.Text, IDL.Text], [], []),
     'updateCategory' : IDL.Func([IDL.Text, IDL.Text], [], []),
     'updateGodown' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [], []),

@@ -70,6 +70,21 @@ function HistoryTab({
     string | null
   >(null);
 
+  // Multi-select state
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const isAdminOrSuper =
+    currentUser.role === "admin" || currentUser.role === "superadmin";
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const toggleRow = (id: number) => {
     setExpandedRows((prev) => {
       const next = new Set(prev);
@@ -129,14 +144,35 @@ function HistoryTab({
             tx.type === "OPENING_STOCK" ||
             tx.type === "inward")
         ) {
-          for (const bi of tx.baleItemsList || []) {
+          // If baleItemsList is empty (e.g. old entry without _baleItems encoding),
+          // fall back to the matching inwardSaved entry to reconstruct item/godown data
+          let itemsForReversal = tx?.baleItemsList || [];
+          if (itemsForReversal.length === 0 && tx?.biltyNo && inwardSaved) {
+            const matchedInward = inwardSaved.find(
+              (e) => e.biltyNumber === tx.biltyNo,
+            );
+            if (matchedInward) {
+              // Map InwardSavedEntry items to the baleItemsList shape
+              itemsForReversal = matchedInward.items.map((item) => ({
+                itemName: item.itemName,
+                category: item.category,
+                attributes: {},
+                qty: item.qty || 0,
+                shopQty: item.shopQty || 0,
+                godownQuants: item.godownBreakdown || {},
+              }));
+            }
+          }
+          for (const bi of itemsForReversal) {
             // Look up the real SKU from inventory by matching category + itemName
             const realSku =
               Object.keys(inventory).find((k) => {
                 const inv = inventory[k];
                 return (
-                  inv.category === bi.category &&
-                  inv.itemName === bi.itemName &&
+                  inv.category.toLowerCase().trim() ===
+                    (bi.category || "").toLowerCase().trim() &&
+                  inv.itemName.toLowerCase().trim() ===
+                    (bi.itemName || "").toLowerCase().trim() &&
                   (!inv.businessId || inv.businessId === activeBusinessId)
                 );
               }) ??
@@ -302,6 +338,145 @@ function HistoryTab({
           </button>
         )}
       </div>
+
+      {/* Multi-select toolbar — admin/superadmin only */}
+      {isAdminOrSuper && filtered.length > 0 && (
+        <div className="flex items-center justify-between gap-3 bg-gray-50 border border-gray-200 rounded-2xl px-4 py-2.5">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={
+                filtered.length > 0 &&
+                filtered.every((t) => selectedIds.has(t.id))
+              }
+              onChange={() => {
+                const allIds = filtered.map((t) => t.id);
+                const allSelected = allIds.every((id) => selectedIds.has(id));
+                if (allSelected) {
+                  setSelectedIds(new Set());
+                } else {
+                  setSelectedIds(new Set(allIds));
+                }
+              }}
+              className="w-4 h-4 accent-blue-600 cursor-pointer"
+              data-ocid="history.select_all.checkbox"
+            />
+            <span className="text-[10px] font-black text-gray-600 uppercase tracking-widest">
+              {filtered.length > 0 &&
+              filtered.every((t) => selectedIds.has(t.id))
+                ? "Deselect All"
+                : "Select All"}
+            </span>
+          </label>
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const count = selectedIds.size;
+                const confirmed = window.confirm(
+                  `Delete ${count} selected record${count > 1 ? "s" : ""}? This cannot be undone.`,
+                );
+                if (!confirmed) return;
+                const idsToDelete = Array.from(selectedIds);
+                for (const id of idsToDelete) {
+                  // Reuse existing handleDelete logic which calls setConfirmDialog
+                  // Instead, replicate the delete logic inline for bulk to avoid
+                  // dialog-per-item; inventory reversal uses the same pattern
+                  const tx = transactions.find((t) => t.id === id);
+                  if (
+                    tx &&
+                    updateStock &&
+                    (tx.type === "INWARD" ||
+                      tx.type === "DIRECT_STOCK" ||
+                      tx.type === "OPENING_STOCK" ||
+                      tx.type === "inward")
+                  ) {
+                    let itemsForReversal = tx?.baleItemsList || [];
+                    if (
+                      itemsForReversal.length === 0 &&
+                      tx?.biltyNo &&
+                      inwardSaved
+                    ) {
+                      const matchedInward = inwardSaved.find(
+                        (e) => e.biltyNumber === tx.biltyNo,
+                      );
+                      if (matchedInward) {
+                        itemsForReversal = matchedInward.items.map((item) => ({
+                          itemName: item.itemName,
+                          category: item.category,
+                          attributes: {},
+                          qty: item.qty || 0,
+                          shopQty: item.shopQty || 0,
+                          godownQuants: item.godownBreakdown || {},
+                        }));
+                      }
+                    }
+                    for (const bi of itemsForReversal) {
+                      const realSku =
+                        Object.keys(inventory).find((k) => {
+                          const inv = inventory[k];
+                          return (
+                            inv.category.toLowerCase().trim() ===
+                              (bi.category || "").toLowerCase().trim() &&
+                            inv.itemName.toLowerCase().trim() ===
+                              (bi.itemName || "").toLowerCase().trim() &&
+                            (!inv.businessId ||
+                              inv.businessId === activeBusinessId)
+                          );
+                        }) ??
+                        [bi.category, bi.itemName]
+                          .filter(Boolean)
+                          .join("-")
+                          .toLowerCase()
+                          .replace(/\s+/g, "-");
+                      if (bi.shopQty) {
+                        updateStock(
+                          realSku,
+                          { category: bi.category, itemName: bi.itemName },
+                          -(bi.shopQty || 0),
+                          0,
+                        );
+                      }
+                      for (const [gdown, qty] of Object.entries(
+                        bi.godownQuants || {},
+                      )) {
+                        if (qty) {
+                          updateStock(
+                            realSku,
+                            { category: bi.category, itemName: bi.itemName },
+                            0,
+                            -(qty || 0),
+                            gdown,
+                          );
+                        }
+                      }
+                    }
+                  }
+                  if (tx && setInwardSaved && tx.biltyNo) {
+                    setInwardSaved((prev) =>
+                      prev.filter((e) => e.biltyNumber !== tx.biltyNo),
+                    );
+                  }
+                }
+                setTransactions((prev) =>
+                  prev.filter((t) => !idsToDelete.includes(t.id)),
+                );
+                setSelectedIds(new Set());
+                showNotification(
+                  `${count} record${count > 1 ? "s" : ""} deleted`,
+                  "success",
+                );
+              }}
+              className="flex items-center gap-1.5 bg-red-600 text-white font-black text-[10px] uppercase px-4 py-2 rounded-xl hover:bg-red-700 transition-colors"
+              data-ocid="history.delete_selected.button"
+            >
+              <Trash2 size={12} />
+              Delete Selected ({selectedIds.size})
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="space-y-4">
         {filtered.length === 0 ? (
           <div className="text-center py-20 bg-white border border-dashed rounded-[3rem]">
@@ -314,12 +489,25 @@ function HistoryTab({
           filtered.map((t) => {
             const isTransfer = t.type === "transfer";
             const isExpanded = expandedRows.has(t.id);
+            const isChecked = selectedIds.has(t.id);
             return (
               <div
                 key={t.id}
-                className={`bg-white rounded-[2rem] border shadow-sm hover:shadow-md transition-shadow ${isTransfer ? "border-purple-100" : "border-gray-100"}`}
+                className={`bg-white rounded-[2rem] border shadow-sm hover:shadow-md transition-shadow ${isChecked ? "border-red-300 bg-red-50/20" : isTransfer ? "border-purple-100" : "border-gray-100"}`}
               >
                 <div className="p-6 flex flex-col md:flex-row justify-between md:items-start gap-4">
+                  {/* Per-row checkbox — admin/superadmin only */}
+                  {isAdminOrSuper && (
+                    <div className="flex items-start pt-1 shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleSelect(t.id)}
+                        className="w-4 h-4 accent-red-600 cursor-pointer"
+                        data-ocid={`history.item.checkbox.${t.id}`}
+                      />
+                    </div>
+                  )}
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
                       <span
@@ -428,7 +616,8 @@ function HistoryTab({
                         <ChevronDown size={16} />
                       )}
                     </button>
-                    {currentUser.role === "admin" &&
+                    {(currentUser.role === "admin" ||
+                      currentUser.role === "superadmin") &&
                       (t.type === "INWARD" || t.type === "DIRECT_STOCK") && (
                         <button
                           type="button"
@@ -438,13 +627,16 @@ function HistoryTab({
                           <Pencil size={16} />
                         </button>
                       )}
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(t.id)}
-                      className="text-red-400 p-2 hover:bg-red-50 rounded-xl transition-colors"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    {(currentUser.role === "admin" ||
+                      currentUser.role === "superadmin") && (
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(t.id)}
+                        className="text-red-400 p-2 hover:bg-red-50 rounded-xl transition-colors"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
                   </div>
                 </div>
                 {isExpanded && (
@@ -963,7 +1155,28 @@ function HistoryTab({
                       editingTx.type === "DIRECT_STOCK" ||
                       editingTx.type === "inward")
                   ) {
-                    const oldItems = oldTx.baleItemsList || [];
+                    let oldItems = oldTx?.baleItemsList || [];
+                    // Fallback: if baleItemsList is empty (entry saved before _baleItems encoding fix),
+                    // reconstruct from matching inwardSaved entry
+                    if (
+                      oldItems.length === 0 &&
+                      oldTx?.biltyNo &&
+                      inwardSaved
+                    ) {
+                      const matchedInward = inwardSaved.find(
+                        (e) => e.biltyNumber === oldTx.biltyNo,
+                      );
+                      if (matchedInward) {
+                        oldItems = matchedInward.items.map((item) => ({
+                          itemName: item.itemName,
+                          category: item.category,
+                          attributes: {},
+                          qty: item.qty || 0,
+                          shopQty: item.shopQty || 0,
+                          godownQuants: item.godownBreakdown || {},
+                        }));
+                      }
+                    }
                     const newItems = editingTx.baleItemsList || [];
                     const deltaMap: Record<
                       string,
@@ -973,6 +1186,9 @@ function HistoryTab({
                         details: Partial<InventoryItem>;
                       }
                     > = {};
+                    // Bug 2 fix: normalize itemName to lowercase for comparison
+                    // inv.itemName is stored via formatItemName (e.g. "Cotton"),
+                    // bi.itemName is raw form input (e.g. "cotton" or "COTTON")
                     const getRealSku = (bi: {
                       category?: string;
                       itemName?: string;
@@ -981,8 +1197,10 @@ function HistoryTab({
                         Object.keys(inventory).find((k) => {
                           const inv = inventory[k];
                           return (
-                            inv.category === bi.category &&
-                            inv.itemName === bi.itemName &&
+                            inv.category.toLowerCase().trim() ===
+                              (bi.category || "").toLowerCase().trim() &&
+                            inv.itemName.toLowerCase().trim() ===
+                              (bi.itemName || "").toLowerCase().trim() &&
                             (!inv.businessId ||
                               inv.businessId === activeBusinessId)
                           );
@@ -1057,17 +1275,41 @@ function HistoryTab({
                       editingTx.type === "DIRECT_STOCK" ||
                       editingTx.type === "inward")
                   ) {
+                    // Bug 5 fix: match by id (from oldTx) not biltyNumber to avoid wrong-entry update
+                    // Bug 3 fix: map baleItemsList.godownQuants -> godownBreakdown to keep data shapes consistent
+                    const matchId = oldTx?.id;
                     setInwardSaved((prev: InwardSavedEntry[]) =>
-                      prev.map((entry: InwardSavedEntry) =>
-                        entry.biltyNumber === editingTx.biltyNo
-                          ? {
-                              ...entry,
-                              items:
-                                (editingTx.baleItemsList as typeof entry.items) ||
-                                entry.items,
-                            }
-                          : entry,
-                      ),
+                      prev.map((entry: InwardSavedEntry) => {
+                        const isMatch =
+                          matchId != null
+                            ? entry.id === matchId || entry.id === matchId + 1
+                            : entry.biltyNumber === editingTx.biltyNo;
+                        if (!isMatch) return entry;
+                        const newItems = editingTx.baleItemsList
+                          ? editingTx.baleItemsList.map((bi) => {
+                              const godownBreakdown = Object.fromEntries(
+                                Object.entries(bi.godownQuants || {}).map(
+                                  ([k, v]) => [k, Number(v) || 0],
+                                ),
+                              );
+                              const godownQty = Object.values(
+                                godownBreakdown,
+                              ).reduce((a, b) => a + b, 0);
+                              return {
+                                category: bi.category,
+                                itemName: bi.itemName,
+                                qty: (bi.shopQty || 0) + godownQty,
+                                shopQty: bi.shopQty || 0,
+                                godownQty,
+                                godownBreakdown,
+                                saleRate: bi.saleRate || 0,
+                                purchaseRate: bi.purchaseRate || 0,
+                                attributes: bi.attributes || {},
+                              };
+                            })
+                          : entry.items;
+                        return { ...entry, items: newItems };
+                      }),
                     );
                   }
 

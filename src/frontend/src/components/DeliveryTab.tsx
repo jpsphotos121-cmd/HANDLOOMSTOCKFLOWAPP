@@ -452,6 +452,7 @@ function DeliveryTab({
             biltyNo: selectedQueue.biltyNo,
             businessId: activeBusinessId,
             isDirectDelivery: true,
+            linkedDeliveryId: record.id,
             notes: `Direct Delivery to Customer | Bilty: ${selectedQueue.biltyNo} | Customer: ${customerName || "N/A"}`,
           };
           setTransactions((prev) => [saleRecord, ...prev]);
@@ -661,6 +662,58 @@ function DeliveryTab({
             return entry;
           }),
         );
+      }
+
+      // Update matching SALE transactions by biltyNo to reflect new item quantities
+      const newTotalByItem: Record<string, number> = {};
+      for (const item of updatedRecord.items) {
+        const key = `${item.itemName}||${item.category || ""}`;
+        newTotalByItem[key] =
+          (newTotalByItem[key] || 0) + (Number(item.qty) || 0);
+      }
+      setTransactions((prev) =>
+        prev.map((tx) => {
+          if (tx.type === "SALE" && tx.biltyNo === editingRecord.biltyNo) {
+            const key = `${tx.itemName || ""}||${tx.category || ""}`;
+            if (newTotalByItem[key] !== undefined) {
+              const newQty = newTotalByItem[key];
+              return { ...tx, itemsCount: newQty };
+            }
+          }
+          return tx;
+        }),
+      );
+      // Also persist updated SALE records to backend
+      if (actor) {
+        for (const tx of _transactions) {
+          if (tx.type === "SALE" && tx.biltyNo === editingRecord.biltyNo) {
+            const key = `${tx.itemName || ""}||${tx.category || ""}`;
+            if (newTotalByItem[key] !== undefined) {
+              const newQty = newTotalByItem[key];
+              (actor as any)
+                .addTxRecord({
+                  id: String(tx.id),
+                  businessId: tx.businessId ?? "b1",
+                  txType: { sale: null },
+                  biltyNumber: tx.biltyNo || "",
+                  category: tx.category || "",
+                  itemName: tx.itemName || "",
+                  subCategory: tx.subCategory || "",
+                  fromLocation: tx.fromLocation || "",
+                  toLocation: tx.toLocation || "",
+                  transport: tx.transportName || "",
+                  qty: BigInt(newQty),
+                  rate: 0,
+                  enteredBy: tx.user || "",
+                  notes: tx.notes || "",
+                  createdAt: BigInt(new Date(tx.date || Date.now()).getTime()),
+                })
+                .catch((e: any) =>
+                  console.warn("Failed to update SALE tx:", e),
+                );
+            }
+          }
+        }
       }
 
       setEditingRecord(null);

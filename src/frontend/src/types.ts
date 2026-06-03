@@ -16,7 +16,7 @@ export interface Business {
 export interface AppUser {
   username: string;
   password: string;
-  role: "admin" | "staff" | "supplier";
+  role: "superadmin" | "admin" | "staff" | "supplier";
   assignedBusinessIds?: string[];
 }
 export interface DeliveryRecord {

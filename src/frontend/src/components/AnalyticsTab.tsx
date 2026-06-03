@@ -70,6 +70,20 @@ function AnalyticsTab({
         if (dateFrom && entry.savedAt < dateFrom) continue;
         if (dateTo && entry.savedAt > dateTo) continue;
         for (const item of entry.items) {
+          // Apply godown filter using godownBreakdown if available
+          let effectiveQty = Number(item.qty) || 0;
+          if (selectedGodown !== "all") {
+            const breakdown = (item as any).godownBreakdown as
+              | Record<string, number>
+              | undefined;
+            if (breakdown && Object.keys(breakdown).length > 0) {
+              effectiveQty = Number(breakdown[selectedGodown]) || 0;
+            } else {
+              // No breakdown available — skip this item for a specific godown filter
+              continue;
+            }
+          }
+          if (effectiveQty <= 0 && selectedGodown !== "all") continue;
           const attrs = (item as any).attributes || {};
           const sub = Object.entries(attrs)
             .map(([k, v]) => `${k}:${v}`)
@@ -83,7 +97,7 @@ function AnalyticsTab({
               inwardQty: 0,
               outwardQty: 0,
             };
-          map[key].inwardQty += Number(item.qty) || 0;
+          map[key].inwardQty += effectiveQty;
         }
       }
       return map;

@@ -4,6 +4,7 @@ import {
   CheckCircle,
   Search,
   Share2,
+  Trash2,
   X,
 } from "lucide-react";
 import type React from "react";
@@ -13,7 +14,12 @@ import {
   getTotalGodownStock,
   resolveItemUnit,
 } from "../constants";
-import type { InventoryItem, InwardSavedEntry, Transaction } from "../types";
+import type {
+  AppUser,
+  InventoryItem,
+  InwardSavedEntry,
+  Transaction,
+} from "../types";
 
 function DashboardTab({
   inventory,
@@ -25,6 +31,8 @@ function DashboardTab({
   categoryUnits = {},
   itemUnitOverrides = {},
   inwardSaved = [],
+  currentUser,
+  setInventoryWithBackend,
 }: {
   inventory: Record<string, InventoryItem>;
   minStockThreshold: number;
@@ -35,8 +43,28 @@ function DashboardTab({
   categoryUnits?: Record<string, "pcs" | "dozen">;
   itemUnitOverrides?: Record<string, "pcs" | "dozen">;
   inwardSaved?: InwardSavedEntry[];
+  currentUser?: AppUser;
+  setInventoryWithBackend?: React.Dispatch<
+    React.SetStateAction<Record<string, InventoryItem>>
+  >;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+
+  const isAdminUser =
+    currentUser?.role === "admin" || currentUser?.role === "superadmin";
+
+  const deleteItem = (sku: string) => {
+    if (!setInventoryWithBackend) return;
+    setInventoryWithBackend((prev) => {
+      const next = { ...prev };
+      delete next[sku];
+      return next;
+    });
+    setDeleteConfirm(null);
+  };
+
+  const deletingItem = deleteConfirm ? inventory[deleteConfirm] : null;
 
   const skus = Object.keys(inventory || {});
   const filteredSkus = skus.filter((sku) => {
@@ -347,13 +375,33 @@ function DashboardTab({
                             {Number(item.saleRate || 0)}
                           </td>
                           <td className="px-6 py-4 text-center">
-                            <button
-                              type="button"
-                              onClick={() => shareWhatsApp(item)}
-                              className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
-                            >
-                              <Share2 size={16} />
-                            </button>
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  shareWhatsApp(item);
+                                }}
+                                className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
+                                title="Share on WhatsApp"
+                              >
+                                <Share2 size={16} />
+                              </button>
+                              {isAdminUser && setInventoryWithBackend && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeleteConfirm(item.sku || "");
+                                  }}
+                                  className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
+                                  title="Remove inventory item"
+                                  data-ocid="dashboard.delete_button"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -363,6 +411,44 @@ function DashboardTab({
               </div>
             </div>
           ))
+      )}
+
+      {/* Delete Inventory Item Confirmation */}
+      {deleteConfirm && deletingItem && (
+        <div className="fixed inset-0 bg-gray-900/60 z-[300] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="bg-red-100 p-2.5 rounded-2xl">
+                <Trash2 size={18} className="text-red-600" />
+              </div>
+              <h3 className="font-black text-gray-900 text-lg">Remove Item?</h3>
+            </div>
+            <p className="text-sm text-gray-600">
+              Are you sure you want to remove{" "}
+              <b className="text-gray-900">{deletingItem.itemName}</b> from
+              inventory? This will permanently delete all stock records for this
+              item across all godowns.
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => deleteItem(deleteConfirm)}
+                className="flex-1 bg-red-600 text-white font-black py-3 rounded-2xl text-xs uppercase"
+                data-ocid="dashboard.confirm_button"
+              >
+                Remove
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(null)}
+                className="flex-1 border font-black py-3 rounded-2xl text-xs uppercase"
+                data-ocid="dashboard.cancel_button"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -377,6 +463,7 @@ function ItemHistoryPanel({
   activeBusinessId,
   onClose,
   inwardSaved = [],
+  currentUser,
 }: {
   sku: string | null;
   inventory: Record<string, InventoryItem>;
@@ -384,6 +471,7 @@ function ItemHistoryPanel({
   activeBusinessId: string;
   onClose: () => void;
   inwardSaved?: InwardSavedEntry[];
+  currentUser?: AppUser;
 }) {
   if (!sku) return null;
   const item = inventory[sku];
@@ -547,16 +635,18 @@ function ItemHistoryPanel({
                 </p>
               </div>
             )}
-            {item.purchaseRate > 0 && (
-              <div className="bg-purple-50 border border-purple-200 px-4 py-2 rounded-2xl">
-                <p className="text-[10px] font-black uppercase text-purple-500">
-                  Purchase Price
-                </p>
-                <p className="text-lg font-black text-purple-700">
-                  ₹{item.purchaseRate}
-                </p>
-              </div>
-            )}
+            {(currentUser?.role === "admin" ||
+              currentUser?.role === "superadmin") &&
+              item.purchaseRate > 0 && (
+                <div className="bg-purple-50 border border-purple-200 px-4 py-2 rounded-2xl">
+                  <p className="text-[10px] font-black uppercase text-purple-500">
+                    Purchase Price
+                  </p>
+                  <p className="text-lg font-black text-purple-700">
+                    ₹{item.purchaseRate}
+                  </p>
+                </div>
+              )}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             <div className="bg-green-50 border border-green-100 p-4 rounded-2xl text-center">

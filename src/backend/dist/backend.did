@@ -1,0 +1,291 @@
+type UserRole = 
+ variant {
+   admin;
+   guest;
+   user;
+ };
+type User = 
+ record {
+   businessIds: vec text;
+   createdAt: int;
+   id: text;
+   password: text;
+   role: Role;
+   username: text;
+ };
+type TxType = 
+ variant {
+   delivery;
+   directStock;
+   inward;
+   sale;
+   transfer;
+ };
+type TxRecord = 
+ record {
+   biltyNumber: text;
+   businessId: text;
+   category: text;
+   createdAt: int;
+   enteredBy: text;
+   fromLocation: text;
+   id: text;
+   itemName: text;
+   notes: text;
+   qty: int;
+   rate: float64;
+   subCategory: text;
+   toLocation: text;
+   transport: text;
+   txType: TxType;
+ };
+type TransportTracker = 
+ record {
+   id: text;
+   trackingUrl: text;
+   transport: text;
+ };
+type TransitEntry = 
+ record {
+   biltyDate: text;
+   biltyNumber: text;
+   businessId: text;
+   category: text;
+   createdAt: int;
+   enteredBy: text;
+   id: text;
+   itemName: text;
+   packages: int;
+   supplier: text;
+   transport: text;
+ };
+type TransferEntry = 
+ record {
+   businessId: text;
+   category: text;
+   createdAt: int;
+   fromId: text;
+   fromType: text;
+   id: text;
+   itemName: text;
+   qty: int;
+   rate: float64;
+   subCategory: text;
+   toId: text;
+   toType: text;
+   transferredBy: text;
+ };
+type SubCategory = 
+ record {
+   fieldType: text;
+   id: text;
+   name: text;
+   options: vec text;
+ };
+type SaleLineItem = 
+ record {
+   category: text;
+   itemName: text;
+   qty: int;
+   rate: float64;
+   subCategory: text;
+ };
+type SaleEntry = 
+ record {
+   businessId: text;
+   createdAt: int;
+   id: text;
+   items: vec SaleLineItem;
+   recordedBy: text;
+ };
+type Role = 
+ variant {
+   admin;
+   staff;
+   supplier;
+ };
+type QueueEntry = 
+ record {
+   bales: vec QueueBale;
+   biltyNumber: text;
+   businessId: text;
+   createdAt: int;
+   delivered: bool;
+   enteredBy: text;
+   id: text;
+   supplier: text;
+   transport: text;
+ };
+type QueueBale = 
+ record {
+   baleLabel: text;
+   category: text;
+   itemName: text;
+   status: text;
+ };
+type LoginResult = 
+ variant {
+   err: text;
+   ok: User;
+ };
+type InwardSavedEntry = 
+ record {
+   biltyNumber: text;
+   businessId: text;
+   id: text;
+   items: vec InwardItem;
+   savedAt: int;
+   savedBy: text;
+   supplier: text;
+   transport: text;
+ };
+type InwardItem = 
+ record {
+   category: text;
+   godownQtys: vec GodownQty;
+   itemName: text;
+   purchaseRate: float64;
+   saleRate: float64;
+   shopQty: int;
+   subCategory: text;
+   totalQty: int;
+ };
+type InventoryItem = 
+ record {
+   businessId: text;
+   category: text;
+   godownQtys: vec GodownQty;
+   id: text;
+   itemName: text;
+   purchaseRate: float64;
+   saleRate: float64;
+   shopQty: int;
+   subCategory: text;
+ };
+type GodownQty = 
+ record {
+   godownId: text;
+   qty: int;
+ };
+type Godown = 
+ record {
+   businessId: text;
+   id: text;
+   name: text;
+ };
+type DeliveryLineItem = 
+ record {
+   category: text;
+   godownId: text;
+   itemName: text;
+   qty: int;
+   subCategory: text;
+ };
+type DeliveryEntry = 
+ record {
+   biltyNumber: text;
+   businessId: text;
+   createdAt: int;
+   customerName: text;
+   customerPhone: text;
+   deliveredBy: text;
+   deliveryType: text;
+   id: text;
+   items: vec DeliveryLineItem;
+ };
+type CategoryV2 = 
+ record {
+   businessId: text;
+   id: text;
+   name: text;
+   subCategories: vec SubCategory;
+ };
+type Business = 
+ record {
+   id: text;
+   name: text;
+ };
+type BiltyPrefix = 
+ record {
+   businessId: text;
+   id: text;
+   prefix: text;
+ };
+service : {
+  _initializeAccessControl: () -> ();
+  addBiltyPrefix: (id: text, prefix: text, businessId: text) -> ();
+  addBusiness: (id: text, name: text) -> ();
+  addCategory: (id: text, name: text, businessId: text) -> ();
+  addDelivery: (entry: DeliveryEntry) -> (text);
+  addGodown: (id: text, name: text, businessId: text) -> ();
+  addInventoryItem: (item: InventoryItem) -> ();
+  addQueueEntry: (entry: QueueEntry) -> ();
+  addSale: (entry: SaleEntry) -> (text);
+  addSubCategory: (categoryId: text, sc: SubCategory) -> ();
+  addTransitEntry: (entry: TransitEntry) -> ();
+  addTransportTracker: (id: text, transport: text, trackingUrl: text) -> ();
+  addTxRecord: ("record": TxRecord) -> ();
+  addUser: (id: text, username: text, password: text, role: Role,
+   businessIds: vec text) -> ();
+  assignCallerUserRole: (user: principal, role: UserRole) -> ();
+  batchAddInventoryItems: (items: vec InventoryItem) -> ();
+  batchSaveInwardItems: (businessId: text, items: vec InwardItem) -> ();
+  biltyExists: (biltyNumber: text) -> (bool) query;
+  deleteBiltyPrefix: (id: text) -> ();
+  deleteBusiness: (id: text) -> ();
+  deleteCategory: (id: text, businessId: text) -> ();
+  deleteCategoryGlobal: (id: text) -> ();
+  deleteDelivery: (id: text) -> ();
+  deleteGodown: (id: text) -> ();
+  deleteInventoryItem: (id: text) -> ();
+  deleteInwardSaved: (id: text) -> ();
+  deleteQueueEntry: (id: text) -> ();
+  deleteSale: (id: text) -> ();
+  deleteSubCategory: (categoryId: text, subCategoryId: text) -> ();
+  deleteTransitEntry: (id: text) -> ();
+  deleteTransportTracker: (id: text) -> ();
+  deleteTxRecord: (id: text) -> ();
+  deleteUser: (id: text) -> ();
+  getAppSettings: () -> (text) query;
+  getBiltyPrefixes: () -> (vec BiltyPrefix) query;
+  getBiltyPrefixesByBusiness: (businessId: text) -> (vec BiltyPrefix) query;
+  getBusinesses: () -> (vec Business) query;
+  getCallerUserRole: () -> (UserRole) query;
+  getCategories: () -> (vec CategoryV2) query;
+  getCategoriesByBusiness: (businessId: text) -> (vec CategoryV2) query;
+  getCurrentUser: () -> (text);
+  getDeliveries: (businessId: text) -> (vec DeliveryEntry) query;
+  getGodowns: () -> (vec Godown) query;
+  getGodownsByBusiness: (businessId: text) -> (vec Godown) query;
+  getInventory: (businessId: text) -> (vec InventoryItem) query;
+  getInwardSaved: (businessId: text) -> (vec InwardSavedEntry) query;
+  getQueueEntries: (businessId: text) -> (vec QueueEntry) query;
+  getSales: (businessId: text) -> (vec SaleEntry) query;
+  getTransfers: (businessId: text) -> (vec TransferEntry) query;
+  getTransitEntries: (businessId: text) -> (vec TransitEntry) query;
+  getTransportTrackers: () -> (vec TransportTracker) query;
+  getTxHistory: (businessId: text) -> (vec TxRecord) query;
+  getUsers: () -> (vec User) query;
+  isCallerAdmin: () -> (bool) query;
+  login: (username: text, password: text) -> (LoginResult);
+  markQueueDelivered: (id: text) -> ();
+  postTransfer: (entry: TransferEntry) -> (text);
+  restoreDelivery: (entry: DeliveryEntry) -> ();
+  restoreInward: (entry: InwardSavedEntry) -> ();
+  restoreQueueEntry: (entry: QueueEntry) -> ();
+  restoreSale: (entry: SaleEntry) -> ();
+  saveAppSettings: (json: text) -> ();
+  saveInward: (entry: InwardSavedEntry) -> ();
+  updateBusiness: (id: text, name: text) -> ();
+  updateCategory: (id: text, name: text) -> ();
+  updateGodown: (id: text, name: text, businessId: text) -> ();
+  updateInventoryItem: (item: InventoryItem) -> ();
+  updateInwardSaved: (entry: InwardSavedEntry) -> ();
+  updateQueueEntry: (entry: QueueEntry) -> ();
+  updateSubCategory: (categoryId: text, sc: SubCategory) -> ();
+  updateTransitEntry: (entry: TransitEntry) -> ();
+  updateTransportTracker: (id: text, transport: text, trackingUrl: text) ->
+   ();
+  updateUser: (id: text, username: text, password: text, role: Role,
+   businessIds: vec text) -> ();
+}

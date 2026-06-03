@@ -25,6 +25,38 @@ import type {
 import { BiltyInput, DynamicFields } from "./BiltyInput";
 import { ComboInput } from "./ComboInput";
 
+// Helper: parse a full bilty label like "sola-1211X10(3)" into components.
+// Returns { base: "sola-1211", count: 10, idx: 3 } or null for simple bilties.
+function parseBiltyLabel(
+  fullBilty: string,
+): { base: string; count: number; idx: number } | null {
+  const m = fullBilty.match(/^(.+?)X(\d+)\((\d+)\)$/i);
+  if (!m) return null;
+  return {
+    base: m[1],
+    count: Number.parseInt(m[2], 10),
+    idx: Number.parseInt(m[3], 10),
+  };
+}
+
+// 4-rule duplicate check. Returns true if `candidate` is a duplicate of `existing`.
+function isBiltyDuplicate(candidate: string, existing: string): boolean {
+  const c = candidate.toLowerCase();
+  const e = existing.toLowerCase();
+  const cParsed = parseBiltyLabel(c);
+  const eParsed = parseBiltyLabel(e);
+  if (cParsed && eParsed) {
+    if (cParsed.base !== eParsed.base) return false;
+    if (cParsed.count !== eParsed.count) return true; // Rule 3: count contradiction
+    if (cParsed.idx === eParsed.idx) return true; // Rule 1: true duplicate
+    return false; // Rule 2: sibling package — allow
+  }
+  if (!cParsed && !eParsed) return c === e;
+  if (cParsed && !eParsed) return cParsed.base === e;
+  if (!cParsed && eParsed) return c === eParsed.base;
+  return false;
+}
+
 function TransitTab({
   transitGoods,
   setTransitGoods,
@@ -71,9 +103,12 @@ function TransitTab({
   transportOptions?: string[];
 }) {
   const _lbl = (key: string, def: string) => fieldLabels?.transit?.[key] || def;
+  const isAdminOrSuperadmin =
+    currentUser.role === "admin" || currentUser.role === "superadmin";
   const [showForm, setShowForm] = useState(true);
   const [biltyPrefix, setBiltyPrefix] = useState(biltyPrefixes?.[0] || "0");
   const [biltyNumber, setBiltyNumber] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [form, setForm] = useState({
     transportName: "",
     supplierName: "",
@@ -173,48 +208,44 @@ function TransitTab({
     const bNo =
       biltyPrefix === "0" ? biltyNumber : `${biltyPrefix}-${biltyNumber}`;
     const pkgCount = Number(form.packages) || 1;
+    // When pkgCount > 1, use the first package label as the check candidate so Rule 4
+    // (plain vs packaged) does not falsely block valid sibling entries.
+    const dupeCheckCandidate = pkgCount > 1 ? `${bNo}X${pkgCount}(1)` : bNo;
     const isDupeTransit = (transitGoods || []).some(
       (g) =>
         (!g.businessId || g.businessId === activeBusinessId) &&
-        g.biltyNo?.toLowerCase() === bNo.toLowerCase(),
+        isBiltyDuplicate(dupeCheckCandidate, g.biltyNo || ""),
     );
     if (isDupeTransit)
       return showNotification(
         `Bilty ${bNo} already exists in Transit!`,
         "error",
       );
-    // Check if bilty exists in Queue
+    // Check if bilty exists in Queue (4-rule: allow sibling packages)
     const isDupeQueue = (pendingParcels || []).some(
       (p) =>
         (!p.businessId || p.businessId === activeBusinessId) &&
-        (p.biltyNo?.toLowerCase() === bNo.toLowerCase() ||
-          (p.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-            bNo.toLowerCase()),
+        isBiltyDuplicate(dupeCheckCandidate, p.biltyNo || ""),
     );
     if (isDupeQueue)
       return showNotification(`Bilty ${bNo} already exists in Queue!`, "error");
-    // Check if bilty exists in Inward history
+    // Check if bilty exists in Inward history (4-rule: allow sibling packages)
     const isDupeInward = (transactions || []).some(
       (t) =>
         t.type === "INWARD" &&
         (!t.businessId || t.businessId === activeBusinessId) &&
-        (t.biltyNo?.toLowerCase() === bNo.toLowerCase() ||
-          (t.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-            bNo.toLowerCase()),
+        isBiltyDuplicate(dupeCheckCandidate, t.biltyNo || ""),
     );
     if (isDupeInward)
       return showNotification(
         `Bilty ${bNo} has already been processed in Inward!`,
         "error",
       );
-    // Check if bilty exists in Inward Saved
+    // Check if bilty exists in Inward Saved (4-rule: allow sibling packages)
     const isDupeInwardSaved = (inwardSaved || []).some(
       (s) =>
         (!s.businessId || s.businessId === activeBusinessId) &&
-        (s.biltyNumber?.toLowerCase() === bNo.toLowerCase() ||
-          (s.biltyNumber || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-            bNo.toLowerCase() ||
-          (s.baseNumber || "").toLowerCase() === bNo.toLowerCase()),
+        isBiltyDuplicate(dupeCheckCandidate, s.biltyNumber || ""),
     );
     if (isDupeInwardSaved)
       return showNotification(
@@ -545,115 +576,202 @@ function TransitTab({
             No records found.
           </div>
         ) : (
-          filtered.map((item) => (
-            <div
-              key={item.id}
-              className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow"
-            >
-              <div className="flex justify-between items-start mb-3">
-                <div>
-                  <span className="bg-indigo-100 text-indigo-700 text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">
-                    In Transit
-                  </span>
-                  <h3 className="font-black text-xl text-gray-900 uppercase mt-1 tracking-tight">
-                    {item.biltyNo}
-                  </h3>
-                </div>
-                <div className="flex gap-2 items-center">
-                  {(() => {
-                    const trackUrl =
-                      transportTracking && item.transportName
-                        ? transportTracking[item.transportName] ||
-                          transportTracking[
-                            item.transportName?.toLowerCase()
-                          ] ||
-                          null
-                        : null;
-                    return trackUrl ? (
-                      <a
-                        href={trackUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bg-blue-100 text-blue-700 px-3 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-blue-200 transition-colors"
-                      >
-                        Track Live
-                      </a>
-                    ) : null;
-                  })()}
-                  {currentUser.role !== "supplier" && setMoveToQueueData && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMoveToQueueData(item);
-                        setActiveTabFromTransit?.("warehouse");
-                      }}
-                      className="bg-amber-100 text-amber-700 px-3 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-amber-200 transition-colors"
-                    >
-                      → Queue
-                    </button>
-                  )}
-                  {currentUser.role !== "supplier" && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setConfirmDialog({
-                          message: "Remove from transit?",
-                          onConfirm: () =>
-                            setTransitGoods((prev) =>
-                              prev.filter((g) => g.id !== item.id),
-                            ),
-                        })
+          <>
+            {/* Multi-select toolbar — admin/superadmin only */}
+            {isAdminOrSuperadmin && (
+              <div className="col-span-full flex items-center gap-3 bg-indigo-50 border border-indigo-200 rounded-2xl px-4 py-2.5">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={
+                      filtered.length > 0 &&
+                      filtered.every((g) => selectedIds.has(g.id))
+                    }
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedIds(new Set(filtered.map((g) => g.id)));
+                      } else {
+                        setSelectedIds(new Set());
                       }
-                      className="text-red-400 p-2 hover:bg-red-50 rounded-xl transition-colors"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    }}
+                    className="w-4 h-4 accent-indigo-600"
+                  />
+                  <span className="text-[10px] font-black uppercase text-indigo-800">
+                    Select All
+                  </span>
+                </label>
+                {selectedIds.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete ${selectedIds.size} selected transit entr${selectedIds.size === 1 ? "y" : "ies"}? This cannot be undone.`,
+                        )
+                      ) {
+                        setTransitGoods((prev) =>
+                          prev.filter((g) => !selectedIds.has(g.id)),
+                        );
+                        setSelectedIds(new Set());
+                        showNotification(
+                          `Deleted ${selectedIds.size} transit entr${selectedIds.size === 1 ? "y" : "ies"}`,
+                          "success",
+                        );
+                      }
+                    }}
+                    className="ml-auto bg-red-600 text-white px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-700 transition-colors"
+                  >
+                    <Trash2 size={12} className="inline mr-1" />
+                    Delete Selected ({selectedIds.size})
+                  </button>
+                )}
+                {selectedIds.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedIds(new Set())}
+                    className="text-[10px] font-bold text-gray-500 hover:text-gray-700 px-2 py-1.5"
+                  >
+                    <X size={12} className="inline mr-1" />
+                    Clear
+                  </button>
+                )}
+              </div>
+            )}
+            {filtered.map((item) => {
+              const isSelected = selectedIds.has(item.id);
+              return (
+                <div
+                  key={item.id}
+                  className={`bg-white p-6 rounded-3xl border shadow-sm hover:shadow-md transition-shadow ${isSelected ? "border-indigo-400 bg-indigo-50/30" : "border-gray-100"}`}
+                >
+                  <div className="flex justify-between items-start mb-3">
+                    <div className="flex items-start gap-3">
+                      {isAdminOrSuperadmin && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={(e) => {
+                            const next = new Set(selectedIds);
+                            if (e.target.checked) {
+                              next.add(item.id);
+                            } else {
+                              next.delete(item.id);
+                            }
+                            setSelectedIds(next);
+                          }}
+                          className="w-4 h-4 accent-indigo-600 mt-1 shrink-0"
+                        />
+                      )}
+                      <div>
+                        <span className="bg-indigo-100 text-indigo-700 text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">
+                          In Transit
+                        </span>
+                        <h3 className="font-black text-xl text-gray-900 uppercase mt-1 tracking-tight">
+                          {item.biltyNo}
+                        </h3>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      {(() => {
+                        const trackUrl =
+                          transportTracking && item.transportName
+                            ? transportTracking[item.transportName] ||
+                              transportTracking[
+                                item.transportName?.toLowerCase()
+                              ] ||
+                              null
+                            : null;
+                        return trackUrl ? (
+                          <a
+                            href={trackUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="bg-blue-100 text-blue-700 px-3 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-blue-200 transition-colors"
+                          >
+                            Track Live
+                          </a>
+                        ) : null;
+                      })()}
+                      {currentUser.role !== "supplier" &&
+                        setMoveToQueueData && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMoveToQueueData(item);
+                              setActiveTabFromTransit?.("warehouse");
+                            }}
+                            className="bg-amber-100 text-amber-700 px-3 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-amber-200 transition-colors"
+                          >
+                            → Queue
+                          </button>
+                        )}
+                      {isAdminOrSuperadmin && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConfirmDialog({
+                              message: "Remove from transit?",
+                              onConfirm: () =>
+                                setTransitGoods((prev) =>
+                                  prev.filter((g) => g.id !== item.id),
+                                ),
+                            })
+                          }
+                          className="text-red-400 p-2 hover:bg-red-50 rounded-xl transition-colors"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px] font-bold text-gray-400 uppercase tracking-tight">
+                    <p>
+                      From:{" "}
+                      <span className="text-gray-700">
+                        {item.supplierName || "-"}
+                      </span>
+                    </p>
+                    <p>
+                      Transport:{" "}
+                      <span className="text-gray-700">
+                        {item.transportName || "-"}
+                      </span>
+                    </p>
+                    <p>
+                      Category:{" "}
+                      <span className="text-gray-700">
+                        {item.category || item.itemCategory || "-"}
+                      </span>
+                    </p>
+                    <p>
+                      Item:{" "}
+                      <span className="text-gray-700">
+                        {item.itemName || "-"}
+                      </span>
+                    </p>
+                    <p>
+                      Date:{" "}
+                      <span className="text-gray-700">{item.date || "-"}</span>
+                    </p>
+                  </div>
+                  {item.date && (
+                    <div className="mt-3 flex items-center gap-2">
+                      <span
+                        className={`text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${Math.ceil((Date.now() - new Date(item.date).getTime()) / 86400000) > 7 ? "bg-orange-100 text-orange-700" : "bg-indigo-50 text-indigo-700"}`}
+                      >
+                        🚚{" "}
+                        {Math.ceil(
+                          (Date.now() - new Date(item.date).getTime()) /
+                            86400000,
+                        )}{" "}
+                        days in transit
+                      </span>
+                    </div>
                   )}
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-[10px] font-bold text-gray-400 uppercase tracking-tight">
-                <p>
-                  From:{" "}
-                  <span className="text-gray-700">
-                    {item.supplierName || "-"}
-                  </span>
-                </p>
-                <p>
-                  Transport:{" "}
-                  <span className="text-gray-700">
-                    {item.transportName || "-"}
-                  </span>
-                </p>
-                <p>
-                  Category:{" "}
-                  <span className="text-gray-700">
-                    {item.category || item.itemCategory || "-"}
-                  </span>
-                </p>
-                <p>
-                  Item:{" "}
-                  <span className="text-gray-700">{item.itemName || "-"}</span>
-                </p>
-                <p>
-                  Date:{" "}
-                  <span className="text-gray-700">{item.date || "-"}</span>
-                </p>
-              </div>
-              {item.date && (
-                <div className="mt-3 flex items-center gap-2">
-                  <span
-                    className={`text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${Math.ceil((Date.now() - new Date(item.date).getTime()) / 86400000) > 7 ? "bg-orange-100 text-orange-700" : "bg-indigo-50 text-indigo-700"}`}
-                  >
-                    🚚{" "}
-                    {Math.ceil(
-                      (Date.now() - new Date(item.date).getTime()) / 86400000,
-                    )}{" "}
-                    days in transit
-                  </span>
-                </div>
-              )}
-            </div>
-          ))
+              );
+            })}
+          </>
         )}
       </div>
     </div>

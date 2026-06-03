@@ -24,6 +24,57 @@ import { BiltyInput, DynamicFields } from "./BiltyInput";
 import { ComboInput } from "./ComboInput";
 import { ItemNameCombo } from "./ItemNameCombo";
 
+// Helper: parse a full bilty label like "sola-1211X10(3)" into components.
+// Returns { base: "sola-1211", count: 10, idx: 3 } or null for simple bilties.
+function parseBiltyLabel(
+  fullBilty: string,
+): { base: string; count: number; idx: number } | null {
+  const m = fullBilty.match(/^(.+?)X(\d+)\((\d+)\)$/i);
+  if (!m) return null;
+  return {
+    base: m[1],
+    count: Number.parseInt(m[2], 10),
+    idx: Number.parseInt(m[3], 10),
+  };
+}
+
+// 4-rule duplicate check for bilty uniqueness.
+// Returns true if `candidate` is a duplicate of `existing`.
+// Rule 1: Same base + same count + same idx → true duplicate → BLOCK
+// Rule 2: Same base + same count + different idx → sibling package → ALLOW
+// Rule 3: Same base + different count → package count contradiction → BLOCK
+// Rule 4: Plain bilty vs base of packaged bilty → BLOCK (same shipment)
+function isBiltyDuplicate(candidate: string, existing: string): boolean {
+  const c = candidate.toLowerCase();
+  const e = existing.toLowerCase();
+  const cParsed = parseBiltyLabel(c);
+  const eParsed = parseBiltyLabel(e);
+
+  if (cParsed && eParsed) {
+    // Both are packaged bilties (base + count + idx)
+    if (cParsed.base !== eParsed.base) return false; // different base → no conflict
+    // Same base: different count → block (package count contradiction — Rule 3)
+    if (cParsed.count !== eParsed.count) return true;
+    // Same base + same count + same idx → true duplicate (Rule 1)
+    if (cParsed.idx === eParsed.idx) return true;
+    // Same base + same count + different idx → sibling package — ALLOW (Rule 2)
+    return false;
+  }
+  if (!cParsed && !eParsed) {
+    // Both are simple (no package suffix) — exact match = duplicate
+    return c === e;
+  }
+  if (cParsed && !eParsed) {
+    // Candidate is packaged, existing is plain base — same shipment, block (Rule 4)
+    return cParsed.base === e;
+  }
+  if (!cParsed && eParsed) {
+    // Candidate is plain, existing is packaged — same shipment, block (Rule 4)
+    return c === eParsed.base;
+  }
+  return false;
+}
+
 function WarehouseTab({
   pendingParcels,
   setPendingParcels,
@@ -47,6 +98,7 @@ function WarehouseTab({
   fieldLabels,
   supplierOptions,
   transportOptions,
+  currentUser,
 }: {
   pendingParcels: PendingParcel[];
   setPendingParcels: React.Dispatch<React.SetStateAction<PendingParcel[]>>;
@@ -72,11 +124,15 @@ function WarehouseTab({
   fieldLabels?: Record<string, Record<string, string>>;
   supplierOptions?: string[];
   transportOptions?: string[];
+  currentUser?: AppUser;
 }) {
   const _lbl = (key: string, def: string) =>
     fieldLabels?.warehouse?.[key] || def;
+  const isAdminOrSuperadmin =
+    currentUser?.role === "admin" || currentUser?.role === "superadmin";
   const [biltyPrefix, setBiltyPrefix] = useState(biltyPrefixes?.[0] || "0");
   const [biltyNumber, setBiltyNumber] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [form, setForm] = useState({
     transportName: "",
     supplier: "",
@@ -243,19 +299,45 @@ function WarehouseTab({
       const queueBiltyList = existingQueueBiltyNos ?? [];
       const pkgCount = Number(form.packages) || 1;
 
-      // Block duplicate base bilty in Queue (covers different package counts)
-      const baseBilty = bNo.replace(/X\d+\(\d+\)$/i, "").toLowerCase();
-      const existsInQueue = (pendingParcels || []).some(
-        (p) =>
-          (!p.businessId || p.businessId === activeBusinessId) &&
-          (p.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-            baseBilty,
-      );
-      if (existsInQueue) {
-        return showNotification(
-          `Bilty ${bNo} already exists in Queue!`,
-          "error",
+      // 4-rule duplicate check in Queue.
+      // For multi-package bilties: check each candidate slot label individually.
+      // Only block if EVERY slot would be a duplicate (nothing new to add).
+      // This correctly allows siblings (e.g., entering lots 6-10 when 1-5 already exist).
+      if (pkgCount > 1) {
+        const allSlotsDupe = Array.from({ length: pkgCount }, (_, i) => {
+          const slotLabel = `${bNo}X${pkgCount}(${i + 1})`;
+          const inQueue = (pendingParcels || []).some(
+            (p) =>
+              (!p.businessId || p.businessId === activeBusinessId) &&
+              isBiltyDuplicate(slotLabel, p.biltyNo || ""),
+          );
+          const inInward = (transactions || []).some(
+            (t) =>
+              t.type === "INWARD" &&
+              (!t.businessId || t.businessId === activeBusinessId) &&
+              isBiltyDuplicate(slotLabel, t.biltyNo || ""),
+          );
+          return inQueue || inInward;
+        }).every(Boolean);
+        if (allSlotsDupe) {
+          return showNotification(
+            `All packages for bilty ${bNo} already exist in Queue or Inward!`,
+            "error",
+          );
+        }
+      } else {
+        // Single-package: use the bilty number directly
+        const existsInQueue = (pendingParcels || []).some(
+          (p) =>
+            (!p.businessId || p.businessId === activeBusinessId) &&
+            isBiltyDuplicate(bNo, p.biltyNo || ""),
         );
+        if (existsInQueue) {
+          return showNotification(
+            `Bilty ${bNo} already exists in Queue!`,
+            "error",
+          );
+        }
       }
 
       if (pkgCount > 1 && baleRows.length > 0) {
@@ -356,29 +438,25 @@ function WarehouseTab({
         return;
       }
 
-      if (queueBiltyList.some((b) => b.toLowerCase() === bNo.toLowerCase())) {
+      if (queueBiltyList.some((b) => isBiltyDuplicate(bNo, b))) {
         return showNotification(
           `Bilty ${bNo} already exists in Queue!`,
           "error",
         );
       }
-      // Strict cross-tab uniqueness check (single-package path)
+      // Strict cross-tab uniqueness check (single-package path) — 4-rule logic
       {
-        const baseBilty = bNo.replace(/X\d+\(\d+\)$/i, "").toLowerCase();
         const inInwardCheck = (transactions || []).some(
           (t) =>
             t.type === "INWARD" &&
             (!t.businessId || t.businessId === activeBusinessId) &&
-            (t.biltyNo || "").replace(/X\d+\(\d+\)$/i, "").toLowerCase() ===
-              baseBilty,
+            isBiltyDuplicate(bNo, t.biltyNo || ""),
         );
         const inInwardSavedCheck = (_inwardSavedQueue || []).some(
           (s) =>
             (!s.businessId || s.businessId === activeBusinessId) &&
-            ((s.biltyNumber || "")
-              .replace(/X\d+\(\d+\)$/i, "")
-              .toLowerCase() === baseBilty ||
-              (s.baseNumber || "").toLowerCase() === baseBilty),
+            (isBiltyDuplicate(bNo, s.biltyNumber || "") ||
+              isBiltyDuplicate(bNo, s.baseNumber || "")),
         );
         if (inInwardCheck)
           return showNotification(
@@ -665,6 +743,68 @@ function WarehouseTab({
           </button>
         )}
       </div>
+
+      {/* Multi-select toolbar — admin/superadmin only */}
+      {isAdminOrSuperadmin && filtered.length > 0 && (
+        <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-2.5">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={
+                filtered.length > 0 &&
+                filtered.every((p) => selectedIds.has(p.id))
+              }
+              onChange={(e) => {
+                if (e.target.checked) {
+                  setSelectedIds(new Set(filtered.map((p) => p.id)));
+                } else {
+                  setSelectedIds(new Set());
+                }
+              }}
+              className="w-4 h-4 accent-amber-600"
+            />
+            <span className="text-[10px] font-black uppercase text-amber-800">
+              Select All
+            </span>
+          </label>
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Delete ${selectedIds.size} selected queue entr${selectedIds.size === 1 ? "y" : "ies"}? This cannot be undone.`,
+                  )
+                ) {
+                  setPendingParcels((prev) =>
+                    prev.filter((p) => !selectedIds.has(p.id)),
+                  );
+                  setSelectedIds(new Set());
+                  showNotification(
+                    `Deleted ${selectedIds.size} queue entr${selectedIds.size === 1 ? "y" : "ies"}`,
+                    "success",
+                  );
+                }
+              }}
+              className="ml-auto bg-red-600 text-white px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-700 transition-colors"
+            >
+              <Trash2 size={12} className="inline mr-1" />
+              Delete Selected ({selectedIds.size})
+            </button>
+          )}
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="text-[10px] font-bold text-gray-500 hover:text-gray-700 px-2 py-1.5"
+            >
+              <X size={12} className="inline mr-1" />
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {filtered.map((p) => {
           const trackUrl =
@@ -672,90 +812,113 @@ function WarehouseTab({
               ? transportTracking[p.transportName] ||
                 transportTracking[p.transportName?.toLowerCase()]
               : null;
+          const isSelected = selectedIds.has(p.id);
           return (
             <div
               key={p.id}
-              className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm"
+              className={`bg-white p-6 rounded-[2rem] border shadow-sm transition-colors ${isSelected ? "border-amber-400 bg-amber-50/40" : "border-gray-100"}`}
             >
               <div className="flex justify-between items-start mb-3">
-                <div>
-                  <span className="text-[8px] font-black bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full uppercase tracking-widest w-fit mb-1">
-                    Queue
-                  </span>
-                  <h3 className="font-black text-xl text-gray-900 uppercase mt-1 tracking-tight">
-                    {p.biltyNo}
-                  </h3>
-                  <div className="text-[10px] font-bold text-gray-400 mt-1 space-y-0.5">
-                    {p.transportName && (
-                      <p>
-                        Transport:{" "}
-                        <span className="text-gray-700">{p.transportName}</span>
-                      </p>
-                    )}
-                    {p.supplier && (
-                      <p>
-                        Supplier:{" "}
-                        <span className="text-gray-700">{p.supplier}</span>
-                      </p>
-                    )}
-                    {p.itemCategory && (
-                      <p>
-                        Category:{" "}
-                        <span className="text-gray-700">{p.itemCategory}</span>
-                      </p>
-                    )}
-                    {p.itemName && (
-                      <p>
-                        Item:{" "}
-                        <span className="text-gray-700">{p.itemName}</span>
-                      </p>
-                    )}
-                    {p.packages && (
-                      <p>
-                        Packages:{" "}
-                        <span className="text-gray-700">{p.packages}</span>
-                      </p>
-                    )}
-                    {(p.arrivalDate || p.dateReceived) && (
-                      <p>
-                        Arrived:{" "}
-                        <span className="text-gray-700">
-                          {p.arrivalDate || p.dateReceived}
-                        </span>
-                      </p>
-                    )}
-                    {p.recordedAt && (
-                      <p>
-                        Logged:{" "}
-                        <span className="text-blue-600 font-black">
-                          {new Date(p.recordedAt).toLocaleString("en-IN", {
-                            day: "2-digit",
-                            month: "short",
-                            year: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit",
-                            hour12: true,
-                          })}
-                        </span>
-                      </p>
-                    )}
-                    {(p.arrivalDate || p.dateReceived) && (
-                      <p>
-                        Days in Queue:{" "}
-                        <span
-                          className={`font-black ${Math.ceil((Date.now() - new Date(p.arrivalDate || p.dateReceived || "").getTime()) / 86400000) > 7 ? "text-orange-600" : "text-gray-700"}`}
-                        >
-                          {Math.ceil(
-                            (Date.now() -
-                              new Date(
-                                p.arrivalDate || p.dateReceived || "",
-                              ).getTime()) /
-                              86400000,
-                          )}{" "}
-                          days
-                        </span>
-                      </p>
-                    )}
+                <div className="flex items-start gap-3">
+                  {isAdminOrSuperadmin && (
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={(e) => {
+                        const next = new Set(selectedIds);
+                        if (e.target.checked) {
+                          next.add(p.id);
+                        } else {
+                          next.delete(p.id);
+                        }
+                        setSelectedIds(next);
+                      }}
+                      className="w-4 h-4 accent-amber-600 mt-1 shrink-0"
+                    />
+                  )}
+                  <div>
+                    <span className="text-[8px] font-black bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full uppercase tracking-widest w-fit mb-1">
+                      Queue
+                    </span>
+                    <h3 className="font-black text-xl text-gray-900 uppercase mt-1 tracking-tight">
+                      {p.biltyNo}
+                    </h3>
+                    <div className="text-[10px] font-bold text-gray-400 mt-1 space-y-0.5">
+                      {p.transportName && (
+                        <p>
+                          Transport:{" "}
+                          <span className="text-gray-700">
+                            {p.transportName}
+                          </span>
+                        </p>
+                      )}
+                      {p.supplier && (
+                        <p>
+                          Supplier:{" "}
+                          <span className="text-gray-700">{p.supplier}</span>
+                        </p>
+                      )}
+                      {p.itemCategory && (
+                        <p>
+                          Category:{" "}
+                          <span className="text-gray-700">
+                            {p.itemCategory}
+                          </span>
+                        </p>
+                      )}
+                      {p.itemName && (
+                        <p>
+                          Item:{" "}
+                          <span className="text-gray-700">{p.itemName}</span>
+                        </p>
+                      )}
+                      {p.packages && (
+                        <p>
+                          Packages:{" "}
+                          <span className="text-gray-700">{p.packages}</span>
+                        </p>
+                      )}
+                      {(p.arrivalDate || p.dateReceived) && (
+                        <p>
+                          Arrived:{" "}
+                          <span className="text-gray-700">
+                            {p.arrivalDate || p.dateReceived}
+                          </span>
+                        </p>
+                      )}
+                      {p.recordedAt && (
+                        <p>
+                          Logged:{" "}
+                          <span className="text-blue-600 font-black">
+                            {new Date(p.recordedAt).toLocaleString("en-IN", {
+                              day: "2-digit",
+                              month: "short",
+                              year: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                              hour12: true,
+                            })}
+                          </span>
+                        </p>
+                      )}
+                      {(p.arrivalDate || p.dateReceived) && (
+                        <p>
+                          Days in Queue:{" "}
+                          <span
+                            className={`font-black ${Math.ceil((Date.now() - new Date(p.arrivalDate || p.dateReceived || "").getTime()) / 86400000) > 7 ? "text-orange-600" : "text-gray-700"}`}
+                          >
+                            {Math.ceil(
+                              (Date.now() -
+                                new Date(
+                                  p.arrivalDate || p.dateReceived || "",
+                                ).getTime()) /
+                                86400000,
+                            )}{" "}
+                            days
+                          </span>
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="flex flex-col gap-2 items-end">
@@ -780,21 +943,23 @@ function WarehouseTab({
                     >
                       Open Bale
                     </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setConfirmDialog({
-                          message: "Remove from Queue?",
-                          onConfirm: () =>
-                            setPendingParcels((prev) =>
-                              prev.filter((x) => x.id !== p.id),
-                            ),
-                        })
-                      }
-                      className="text-red-400 p-2 hover:bg-red-50 rounded-full transition-colors"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    {isAdminOrSuperadmin && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setConfirmDialog({
+                            message: "Remove from Queue?",
+                            onConfirm: () =>
+                              setPendingParcels((prev) =>
+                                prev.filter((x) => x.id !== p.id),
+                              ),
+                          })
+                        }
+                        className="text-red-400 p-2 hover:bg-red-50 rounded-full transition-colors"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

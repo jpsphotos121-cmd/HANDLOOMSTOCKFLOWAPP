@@ -100,13 +100,9 @@ export interface DeliveryEntry {
     biltyNumber: string;
     items: Array<DeliveryLineItem>;
 }
-export interface Category {
-    id: string;
-    name: string;
-    subCategories: Array<SubCategory>;
-}
 export interface BiltyPrefix {
     id: string;
+    businessId: string;
     prefix: string;
 }
 export interface Business {
@@ -148,6 +144,12 @@ export interface InwardSavedEntry {
     savedAt: bigint;
     savedBy: string;
     items: Array<InwardItem>;
+}
+export interface CategoryV2 {
+    id: string;
+    businessId: string;
+    name: string;
+    subCategories: Array<SubCategory>;
 }
 export interface InventoryItem {
     id: string;
@@ -280,46 +282,46 @@ export enum UserRole {
     guest = "guest"
 }
 export interface backendInterface {
-    _initializeAccessControlWithSecret(userSecret: string): Promise<void>;
-    addBiltyPrefix(id: string, prefix: string): Promise<void>;
+    _initializeAccessControl(): Promise<void>;
+    addBiltyPrefix(id: string, prefix: string, businessId: string): Promise<void>;
     addBusiness(id: string, name: string): Promise<void>;
     addCategory(id: string, name: string, businessId: string): Promise<void>;
-    getCategoriesByBusiness(businessId: string): Promise<unknown[]>;
     addDelivery(entry: DeliveryEntry): Promise<string>;
     addGodown(id: string, name: string, businessId: string): Promise<void>;
     addInventoryItem(item: InventoryItem): Promise<void>;
     addQueueEntry(entry: QueueEntry): Promise<void>;
     addSale(entry: SaleEntry): Promise<string>;
-    deleteSale(id: string): Promise<void>;
-    restoreSale(entry: SaleEntry): Promise<void>;
     addSubCategory(categoryId: string, sc: SubCategory): Promise<void>;
     addTransitEntry(entry: TransitEntry): Promise<void>;
     addTransportTracker(id: string, transport: string, trackingUrl: string): Promise<void>;
     addTxRecord(record: TxRecord): Promise<void>;
     addUser(id: string, username: string, password: string, role: Role, businessIds: Array<string>): Promise<void>;
     assignCallerUserRole(user: Principal, role: UserRole): Promise<void>;
+    batchAddInventoryItems(items: Array<InventoryItem>): Promise<void>;
+    batchSaveInwardItems(businessId: string, items: Array<InwardItem>): Promise<void>;
     biltyExists(biltyNumber: string): Promise<boolean>;
     deleteBiltyPrefix(id: string): Promise<void>;
     deleteBusiness(id: string): Promise<void>;
     deleteCategory(id: string, businessId: string): Promise<void>;
     deleteCategoryGlobal(id: string): Promise<void>;
-    deleteGodown(id: string): Promise<void>;
     deleteDelivery(id: string): Promise<void>;
-    restoreDelivery(entry: DeliveryEntry): Promise<void>;
+    deleteGodown(id: string): Promise<void>;
     deleteInventoryItem(id: string): Promise<void>;
     deleteInwardSaved(id: string): Promise<void>;
     deleteQueueEntry(id: string): Promise<void>;
+    deleteSale(id: string): Promise<void>;
     deleteSubCategory(categoryId: string, subCategoryId: string): Promise<void>;
     deleteTransitEntry(id: string): Promise<void>;
     deleteTransportTracker(id: string): Promise<void>;
     deleteTxRecord(id: string): Promise<void>;
-    saveAppSettings(json: string): Promise<void>;
-    getAppSettings(): Promise<string>;
     deleteUser(id: string): Promise<void>;
+    getAppSettings(): Promise<string>;
     getBiltyPrefixes(): Promise<Array<BiltyPrefix>>;
+    getBiltyPrefixesByBusiness(businessId: string): Promise<Array<BiltyPrefix>>;
     getBusinesses(): Promise<Array<Business>>;
     getCallerUserRole(): Promise<UserRole>;
-    getCategories(): Promise<Array<Category>>;
+    getCategories(): Promise<Array<CategoryV2>>;
+    getCategoriesByBusiness(businessId: string): Promise<Array<CategoryV2>>;
     getCurrentUser(): Promise<string>;
     getDeliveries(businessId: string): Promise<Array<DeliveryEntry>>;
     getGodowns(): Promise<Array<Godown>>;
@@ -337,6 +339,11 @@ export interface backendInterface {
     login(username: string, password: string): Promise<LoginResult>;
     markQueueDelivered(id: string): Promise<void>;
     postTransfer(entry: TransferEntry): Promise<string>;
+    restoreDelivery(entry: DeliveryEntry): Promise<void>;
+    restoreInward(entry: InwardSavedEntry): Promise<void>;
+    restoreQueueEntry(entry: QueueEntry): Promise<void>;
+    restoreSale(entry: SaleEntry): Promise<void>;
+    saveAppSettings(json: string): Promise<void>;
     saveInward(entry: InwardSavedEntry): Promise<void>;
     updateBusiness(id: string, name: string): Promise<void>;
     updateCategory(id: string, name: string): Promise<void>;
@@ -352,31 +359,31 @@ export interface backendInterface {
 import type { LoginResult as _LoginResult, Role as _Role, TxRecord as _TxRecord, TxType as _TxType, User as _User, UserRole as _UserRole } from "./declarations/backend.did.d.ts";
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
-    async _initializeAccessControlWithSecret(arg0: string): Promise<void> {
+    async _initializeAccessControl(): Promise<void> {
         if (this.processError) {
             try {
-                const result = await this.actor._initializeAccessControlWithSecret(arg0);
+                const result = await this.actor._initializeAccessControl();
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor._initializeAccessControlWithSecret(arg0);
+            const result = await this.actor._initializeAccessControl();
             return result;
         }
     }
-    async addBiltyPrefix(arg0: string, arg1: string): Promise<void> {
+    async addBiltyPrefix(arg0: string, arg1: string, arg2: string): Promise<void> {
         if (this.processError) {
             try {
-                const result = await this.actor.addBiltyPrefix(arg0, arg1);
+                const result = await this.actor.addBiltyPrefix(arg0, arg1, arg2);
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor.addBiltyPrefix(arg0, arg1);
+            const result = await this.actor.addBiltyPrefix(arg0, arg1, arg2);
             return result;
         }
     }
@@ -394,7 +401,7 @@ export class Backend implements backendInterface {
             return result;
         }
     }
-    async addCategory(arg0: string, arg1: string, arg2: string = 'b1'): Promise<void> {
+    async addCategory(arg0: string, arg1: string, arg2: string): Promise<void> {
         if (this.processError) {
             try {
                 const result = await this.actor.addCategory(arg0, arg1, arg2);
@@ -562,6 +569,34 @@ export class Backend implements backendInterface {
             return result;
         }
     }
+    async batchAddInventoryItems(arg0: Array<InventoryItem>): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.batchAddInventoryItems(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.batchAddInventoryItems(arg0);
+            return result;
+        }
+    }
+    async batchSaveInwardItems(arg0: string, arg1: Array<InwardItem>): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.batchSaveInwardItems(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.batchSaveInwardItems(arg0, arg1);
+            return result;
+        }
+    }
     async biltyExists(arg0: string): Promise<boolean> {
         if (this.processError) {
             try {
@@ -619,18 +654,32 @@ export class Backend implements backendInterface {
         }
     }
     async deleteCategoryGlobal(arg0: string): Promise<void> {
-        if (this.retryCount < this.maxRetries) {
+        if (this.processError) {
             try {
                 const result = await this.actor.deleteCategoryGlobal(arg0);
-                this.retryCount = 0;
                 return result;
-            } catch (error) {
-                this.retryCount++;
-                return this.deleteCategoryGlobal(arg0);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
             }
+        } else {
+            const result = await this.actor.deleteCategoryGlobal(arg0);
+            return result;
         }
-        const result = await this.actor.deleteCategoryGlobal(arg0);
-        return result;
+    }
+    async deleteDelivery(arg0: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.deleteDelivery(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.deleteDelivery(arg0);
+            return result;
+        }
     }
     async deleteGodown(arg0: string): Promise<void> {
         if (this.processError) {
@@ -688,6 +737,20 @@ export class Backend implements backendInterface {
             return result;
         }
     }
+    async deleteSale(arg0: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.deleteSale(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.deleteSale(arg0);
+            return result;
+        }
+    }
     async deleteSubCategory(arg0: string, arg1: string): Promise<void> {
         if (this.processError) {
             try {
@@ -730,62 +793,6 @@ export class Backend implements backendInterface {
             return result;
         }
     }
-    async deleteDelivery(arg0: string): Promise<void> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.deleteDelivery(arg0);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.deleteDelivery(arg0);
-            return result;
-        }
-    }
-    async restoreDelivery(arg0: DeliveryEntry): Promise<void> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.restoreDelivery(arg0);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.restoreDelivery(arg0);
-            return result;
-        }
-    }
-    async deleteSale(arg0: string): Promise<void> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.deleteSale(arg0);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.deleteSale(arg0);
-            return result;
-        }
-    }
-    async restoreSale(arg0: SaleEntry): Promise<void> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.restoreSale(arg0);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.restoreSale(arg0);
-            return result;
-        }
-    }
     async deleteTxRecord(arg0: string): Promise<void> {
         if (this.processError) {
             try {
@@ -797,34 +804,6 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.deleteTxRecord(arg0);
-            return result;
-        }
-    }
-    async saveAppSettings(arg0: string): Promise<void> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.saveAppSettings(arg0);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.saveAppSettings(arg0);
-            return result;
-        }
-    }
-    async getAppSettings(): Promise<string> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.getAppSettings();
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.getAppSettings();
             return result;
         }
     }
@@ -842,6 +821,20 @@ export class Backend implements backendInterface {
             return result;
         }
     }
+    async getAppSettings(): Promise<string> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getAppSettings();
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getAppSettings();
+            return result;
+        }
+    }
     async getBiltyPrefixes(): Promise<Array<BiltyPrefix>> {
         if (this.processError) {
             try {
@@ -853,6 +846,20 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.getBiltyPrefixes();
+            return result;
+        }
+    }
+    async getBiltyPrefixesByBusiness(arg0: string): Promise<Array<BiltyPrefix>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getBiltyPrefixesByBusiness(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getBiltyPrefixesByBusiness(arg0);
             return result;
         }
     }
@@ -884,21 +891,7 @@ export class Backend implements backendInterface {
             return from_candid_UserRole_n9(this._uploadFile, this._downloadFile, result);
         }
     }
-    async getCategoriesByBusiness(businessId: string): Promise<unknown[]> {
-        if (this.processError) {
-            try {
-                const result = await (this.actor as any).getCategoriesByBusiness(businessId);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await (this.actor as any).getCategoriesByBusiness(businessId);
-            return result;
-        }
-    }
-    async getCategories(): Promise<Array<Category>> {
+    async getCategories(): Promise<Array<CategoryV2>> {
         if (this.processError) {
             try {
                 const result = await this.actor.getCategories();
@@ -909,6 +902,20 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.getCategories();
+            return result;
+        }
+    }
+    async getCategoriesByBusiness(arg0: string): Promise<Array<CategoryV2>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getCategoriesByBusiness(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getCategoriesByBusiness(arg0);
             return result;
         }
     }
@@ -1147,6 +1154,76 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.postTransfer(arg0);
+            return result;
+        }
+    }
+    async restoreDelivery(arg0: DeliveryEntry): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.restoreDelivery(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.restoreDelivery(arg0);
+            return result;
+        }
+    }
+    async restoreInward(arg0: InwardSavedEntry): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.restoreInward(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.restoreInward(arg0);
+            return result;
+        }
+    }
+    async restoreQueueEntry(arg0: QueueEntry): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.restoreQueueEntry(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.restoreQueueEntry(arg0);
+            return result;
+        }
+    }
+    async restoreSale(arg0: SaleEntry): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.restoreSale(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.restoreSale(arg0);
+            return result;
+        }
+    }
+    async saveAppSettings(arg0: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.saveAppSettings(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.saveAppSettings(arg0);
             return result;
         }
     }

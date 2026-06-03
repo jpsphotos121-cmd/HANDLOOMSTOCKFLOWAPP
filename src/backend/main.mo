@@ -1,10 +1,10 @@
 import Time     "mo:core/Time";
-import Array    "mo:base/Array";
-import Buffer   "mo:base/Buffer";
+import Array    "mo:core/Array";
+import List     "mo:core/List";
 import HashMap  "mo:base/HashMap";
 import Text     "mo:base/Text";
-import AccessControl    "authorization/access-control";
-import MixinAuthorization "authorization/MixinAuthorization";
+import AccessControl    "mo:caffeineai-authorization/access-control";
+import MixinAuthorization "mo:caffeineai-authorization/MixinAuthorization";
 import Principal "mo:core/Principal";
 
 actor {
@@ -43,7 +43,7 @@ actor {
     businessId    : Text;
   };
 
-  type BiltyPrefix      = { id : Text; prefix : Text };
+  type BiltyPrefix      = { id : Text; prefix : Text; businessId : Text };
   type TransportTracker = { id : Text; transport : Text; trackingUrl : Text };
   type LoginResult      = { #ok : User; #err : Text };
 
@@ -184,25 +184,28 @@ actor {
   };
 
   // ---- Stable storage ----
-  stable var users             : [User]             = [];
-  stable var businesses        : [Business]         = [];
-  stable var godowns           : [Godown]           = [];
-  stable var categories        : [Category]         = [];
-  stable var categoriesV2      : [CategoryV2]       = [];
-  stable var biltyPrefixes     : [BiltyPrefix]      = [];
-  stable var transportTrackers : [TransportTracker] = [];
-  stable var transitEntries    : [TransitEntry]     = [];
-  stable var queueEntries      : [QueueEntry]       = [];
-  stable var inwardSaved       : [InwardSavedEntry] = [];
-  stable var inventory         : [InventoryItem]    = [];
-  stable var transfers         : [TransferEntry]    = [];
-  stable var deliveries        : [DeliveryEntry]    = [];
-  stable var sales             : [SaleEntry]        = [];
-  stable var txHistory         : [TxRecord]         = [];
-  stable var appSettings       : Text               = "{}";
-  stable var categoryBusinessMap : [(Text, Text)]   = [];
-  stable var seeded      : Bool = false;
-  stable var seedVersion : Nat  = 0;
+  // biltyPrefixes: kept with old shape for upgrade compatibility (no businessId)
+  // biltyPrefixesV2: new shape with businessId field
+  var biltyPrefixes     : [{id : Text; prefix : Text}] = [];
+  var biltyPrefixesV2   : [BiltyPrefix]      = [];
+  var users             : [User]             = [];
+  var businesses        : [Business]         = [];
+  var godowns           : [Godown]           = [];
+  var categories        : [Category]         = [];
+  var categoriesV2      : [CategoryV2]       = [];
+  var transportTrackers : [TransportTracker] = [];
+  var transitEntries    : [TransitEntry]     = [];
+  var queueEntries      : [QueueEntry]       = [];
+  var inwardSaved       : [InwardSavedEntry] = [];
+  var inventory         : [InventoryItem]    = [];
+  var transfers         : [TransferEntry]    = [];
+  var deliveries        : [DeliveryEntry]    = [];
+  var sales             : [SaleEntry]        = [];
+  var txHistory         : [TxRecord]         = [];
+  var appSettings       : Text               = "{}";
+  var categoryBusinessMap : [(Text, Text)]   = [];
+  var seeded      : Bool = false;
+  var seedVersion : Nat  = 0;
 
   let accessControlState = AccessControl.initState();
   include MixinAuthorization(accessControlState);
@@ -272,11 +275,11 @@ actor {
         }
       ];
       categoryBusinessMap := [("cat1","b1"),("cat2","b1"),("cat3","b1")];
-      biltyPrefixes := [
-        { id = "p1"; prefix = "sola" },
-        { id = "p2"; prefix = "erob" },
-        { id = "p3"; prefix = "cheb" },
-        { id = "p4"; prefix = "0"    }
+      biltyPrefixesV2 := [
+        { id = "p1"; prefix = "sola"; businessId = "" },
+        { id = "p2"; prefix = "erob"; businessId = "" },
+        { id = "p3"; prefix = "cheb"; businessId = "" },
+        { id = "p4"; prefix = "0";    businessId = "" }
       ];
       users := [
         { id = "u1"; username = "admin";    password = "password"; role = #admin;    businessIds = ["b1"]; createdAt = 0 },
@@ -288,9 +291,9 @@ actor {
     if (seedVersion < 8) {
       seedVersion := 8;
       if (categoriesV2.size() == 0 and categories.size() > 0) {
-        let buf = Buffer.Buffer<CategoryV2>(categories.size());
+        let buf = List.empty<CategoryV2>();
         for (c in categories.vals()) {
-          let bizMappings = Array.filter(categoryBusinessMap, func((cId, _) : (Text, Text)) : Bool { cId == c.id });
+          let bizMappings = categoryBusinessMap.filter(func((cId, _) : (Text, Text)) : Bool { cId == c.id });
           if (bizMappings.size() == 0) {
             buf.add({ id = c.id; name = c.name; subCategories = c.subCategories; businessId = "b1" });
           } else {
@@ -300,7 +303,7 @@ actor {
             };
           };
         };
-        categoriesV2 := Buffer.toArray(buf);
+        categoriesV2 := buf.toArray();
       };
     };
 
@@ -321,22 +324,22 @@ actor {
   public query func getUsers() : async [User] { users };
 
   public func addUser(id : Text, username : Text, password : Text, role : Role, businessIds : [Text]) : async () {
-    let buf = Buffer.fromArray<User>(users);
+    let buf = List.fromArray<User>(users);
     buf.add({ id; username; password; role; businessIds; createdAt = Time.now() });
-    users := Buffer.toArray(buf);
+    users := buf.toArray();
   };
 
   public func updateUser(id : Text, username : Text, password : Text, role : Role, businessIds : [Text]) : async () {
-    let buf = Buffer.Buffer<User>(users.size());
+    let buf = List.empty<User>();
     for (u in users.vals()) {
       if (u.id == id) { buf.add({ id; username; password; role; businessIds; createdAt = u.createdAt }) }
       else buf.add(u);
     };
-    users := Buffer.toArray(buf);
+    users := buf.toArray();
   };
 
   public func deleteUser(id : Text) : async () {
-    users := Array.filter(users, func(u : User) : Bool { u.id != id });
+    users := users.filter(func(u : User) : Bool { u.id != id });
   };
 
   // ---- Businesses ----
@@ -344,21 +347,27 @@ actor {
   public query func getBusinesses() : async [Business] { businesses };
 
   public func addBusiness(id : Text, name : Text) : async () {
-    let buf = Buffer.fromArray<Business>(businesses);
+    let buf = List.fromArray<Business>(businesses);
     buf.add({ id; name });
-    businesses := Buffer.toArray(buf);
+    businesses := buf.toArray();
   };
 
   public func updateBusiness(id : Text, name : Text) : async () {
-    let buf = Buffer.Buffer<Business>(businesses.size());
+    let buf = List.empty<Business>();
     for (b in businesses.vals()) {
       if (b.id == id) buf.add({ id; name }) else buf.add(b);
     };
-    businesses := Buffer.toArray(buf);
+    businesses := buf.toArray();
   };
 
   public func deleteBusiness(id : Text) : async () {
-    businesses := Array.filter(businesses, func(b : Business) : Bool { b.id != id });
+    businesses      := businesses.filter(func(b : Business) : Bool { b.id != id });
+    users           := users.map<User, User>(func(u : User) : User {
+      { u with businessIds = u.businessIds.filter(func(bid : Text) : Bool { bid != id }) }
+    });
+    godowns         := godowns.filter(func(g : Godown) : Bool { g.businessId != id });
+    categoriesV2    := categoriesV2.filter(func(c : CategoryV2) : Bool { c.businessId != id });
+    biltyPrefixesV2 := biltyPrefixesV2.filter(func(p : BiltyPrefix) : Bool { p.businessId != id });
   };
 
   // ---- Godowns ----
@@ -366,27 +375,27 @@ actor {
   public query func getGodowns() : async [Godown] { godowns };
 
   public query func getGodownsByBusiness(businessId : Text) : async [Godown] {
-    Array.filter(godowns, func(g : Godown) : Bool {
+    godowns.filter(func(g : Godown) : Bool {
       g.businessId == businessId or (g.businessId == "" and businessId == "b1")
     })
   };
 
   public func addGodown(id : Text, name : Text, businessId : Text) : async () {
-    let buf = Buffer.fromArray<Godown>(godowns);
+    let buf = List.fromArray<Godown>(godowns);
     buf.add({ id; name; businessId });
-    godowns := Buffer.toArray(buf);
+    godowns := buf.toArray();
   };
 
   public func updateGodown(id : Text, name : Text, businessId : Text) : async () {
-    let buf = Buffer.Buffer<Godown>(godowns.size());
+    let buf = List.empty<Godown>();
     for (g in godowns.vals()) {
       if (g.id == id) buf.add({ id; name; businessId }) else buf.add(g);
     };
-    godowns := Buffer.toArray(buf);
+    godowns := buf.toArray();
   };
 
   public func deleteGodown(id : Text) : async () {
-    godowns := Array.filter(godowns, func(g : Godown) : Bool { g.id != id });
+    godowns := godowns.filter(func(g : Godown) : Bool { g.id != id });
   };
 
   // ---- Categories ----
@@ -394,7 +403,7 @@ actor {
   public query func getCategories() : async [CategoryV2] { categoriesV2 };
 
   public query func getCategoriesByBusiness(businessId : Text) : async [CategoryV2] {
-    Array.filter(categoriesV2, func(c : CategoryV2) : Bool {
+    categoriesV2.filter(func(c : CategoryV2) : Bool {
       c.businessId == businessId or (c.businessId == "" and businessId == "b1")
     })
   };
@@ -403,83 +412,89 @@ actor {
     for (c in categoriesV2.vals()) {
       if (c.id == id and c.businessId == businessId) return;
     };
-    let buf = Buffer.fromArray<CategoryV2>(categoriesV2);
+    let buf = List.fromArray<CategoryV2>(categoriesV2);
     buf.add({ id; name; subCategories = []; businessId });
-    categoriesV2 := Buffer.toArray(buf);
-    categoryBusinessMap := Array.append(categoryBusinessMap, [(id, businessId)]);
+    categoriesV2 := buf.toArray();
+    categoryBusinessMap := categoryBusinessMap.concat([(id, businessId)]);
   };
 
   public func updateCategory(id : Text, name : Text) : async () {
-    let buf = Buffer.Buffer<CategoryV2>(categoriesV2.size());
+    let buf = List.empty<CategoryV2>();
     for (c in categoriesV2.vals()) {
       if (c.id == id) buf.add({ id; name; subCategories = c.subCategories; businessId = c.businessId })
       else buf.add(c);
     };
-    categoriesV2 := Buffer.toArray(buf);
+    categoriesV2 := buf.toArray();
   };
 
   public func deleteCategory(id : Text, businessId : Text) : async () {
-    categoriesV2 := Array.filter(categoriesV2, func(c : CategoryV2) : Bool {
+    categoriesV2 := categoriesV2.filter(func(c : CategoryV2) : Bool {
       not (c.id == id and c.businessId == businessId)
     });
-    categoryBusinessMap := Array.filter(categoryBusinessMap, func((cId, bId) : (Text, Text)) : Bool {
+    categoryBusinessMap := categoryBusinessMap.filter(func((cId, bId) : (Text, Text)) : Bool {
       not (cId == id and bId == businessId)
     });
   };
 
   public func deleteCategoryGlobal(id : Text) : async () {
-    categoriesV2      := Array.filter(categoriesV2, func(c : CategoryV2) : Bool { c.id != id });
-    categories        := Array.filter(categories,   func(c : Category)   : Bool { c.id != id });
-    categoryBusinessMap := Array.filter(categoryBusinessMap, func((cId,_) : (Text,Text)) : Bool { cId != id });
+    categoriesV2      := categoriesV2.filter(func(c : CategoryV2) : Bool { c.id != id });
+    categories        := categories.filter(func(c : Category)   : Bool { c.id != id });
+    categoryBusinessMap := categoryBusinessMap.filter(func((cId,_) : (Text,Text)) : Bool { cId != id });
   };
 
   public func addSubCategory(categoryId : Text, sc : SubCategory) : async () {
-    let buf = Buffer.Buffer<CategoryV2>(categoriesV2.size());
+    let buf = List.empty<CategoryV2>();
     for (c in categoriesV2.vals()) {
       if (c.id == categoryId) {
         buf.add({ id = c.id; name = c.name; businessId = c.businessId;
-                  subCategories = Array.append(c.subCategories, [sc]) });
+                  subCategories = c.subCategories.concat([sc]) });
       } else buf.add(c);
     };
-    categoriesV2 := Buffer.toArray(buf);
+    categoriesV2 := buf.toArray();
   };
 
   public func updateSubCategory(categoryId : Text, sc : SubCategory) : async () {
-    let buf = Buffer.Buffer<CategoryV2>(categoriesV2.size());
+    let buf = List.empty<CategoryV2>();
     for (c in categoriesV2.vals()) {
       if (c.id == categoryId) {
         buf.add({ id = c.id; name = c.name; businessId = c.businessId;
-                  subCategories = Array.map(c.subCategories, func(s : SubCategory) : SubCategory {
+                  subCategories = c.subCategories.map(func(s : SubCategory) : SubCategory {
                     if (s.id == sc.id) sc else s
                   }) });
       } else buf.add(c);
     };
-    categoriesV2 := Buffer.toArray(buf);
+    categoriesV2 := buf.toArray();
   };
 
   public func deleteSubCategory(categoryId : Text, subCategoryId : Text) : async () {
-    let buf = Buffer.Buffer<CategoryV2>(categoriesV2.size());
+    let buf = List.empty<CategoryV2>();
     for (c in categoriesV2.vals()) {
       if (c.id == categoryId) {
         buf.add({ id = c.id; name = c.name; businessId = c.businessId;
-                  subCategories = Array.filter(c.subCategories, func(s : SubCategory) : Bool { s.id != subCategoryId }) });
+                  subCategories = c.subCategories.filter(func(s : SubCategory) : Bool { s.id != subCategoryId }) });
       } else buf.add(c);
     };
-    categoriesV2 := Buffer.toArray(buf);
+    categoriesV2 := buf.toArray();
   };
 
   // ---- Bilty Prefixes ----
 
-  public query func getBiltyPrefixes() : async [BiltyPrefix] { biltyPrefixes };
+  public query func getBiltyPrefixes() : async [BiltyPrefix] { biltyPrefixesV2 };
 
-  public func addBiltyPrefix(id : Text, prefix : Text) : async () {
-    let buf = Buffer.fromArray<BiltyPrefix>(biltyPrefixes);
-    buf.add({ id; prefix });
-    biltyPrefixes := Buffer.toArray(buf);
+  public query func getBiltyPrefixesByBusiness(businessId : Text) : async [BiltyPrefix] {
+    biltyPrefixesV2.filter(func(p : BiltyPrefix) : Bool {
+      p.businessId == businessId or p.businessId == ""
+    })
+  };
+
+  public func addBiltyPrefix(id : Text, prefix : Text, businessId : Text) : async () {
+    let buf = List.fromArray<BiltyPrefix>(biltyPrefixesV2);
+    buf.add({ id; prefix; businessId });
+    biltyPrefixesV2 := buf.toArray();
   };
 
   public func deleteBiltyPrefix(id : Text) : async () {
-    biltyPrefixes := Array.filter(biltyPrefixes, func(p : BiltyPrefix) : Bool { p.id != id });
+    biltyPrefixesV2 := biltyPrefixesV2.filter(func(p : BiltyPrefix) : Bool { p.id != id });
   };
 
   // ---- Transport Trackers ----
@@ -487,49 +502,49 @@ actor {
   public query func getTransportTrackers() : async [TransportTracker] { transportTrackers };
 
   public func addTransportTracker(id : Text, transport : Text, trackingUrl : Text) : async () {
-    let buf = Buffer.fromArray<TransportTracker>(transportTrackers);
+    let buf = List.fromArray<TransportTracker>(transportTrackers);
     buf.add({ id; transport; trackingUrl });
-    transportTrackers := Buffer.toArray(buf);
+    transportTrackers := buf.toArray();
   };
 
   public func updateTransportTracker(id : Text, transport : Text, trackingUrl : Text) : async () {
-    let buf = Buffer.Buffer<TransportTracker>(transportTrackers.size());
+    let buf = List.empty<TransportTracker>();
     for (t in transportTrackers.vals()) {
       if (t.id == id) buf.add({ id; transport; trackingUrl }) else buf.add(t);
     };
-    transportTrackers := Buffer.toArray(buf);
+    transportTrackers := buf.toArray();
   };
 
   public func deleteTransportTracker(id : Text) : async () {
-    transportTrackers := Array.filter(transportTrackers, func(t : TransportTracker) : Bool { t.id != id });
+    transportTrackers := transportTrackers.filter(func(t : TransportTracker) : Bool { t.id != id });
   };
 
   // ---- Transit Entries ----
 
   public query func getTransitEntries(businessId : Text) : async [TransitEntry] {
-    Array.filter(transitEntries, func(e : TransitEntry) : Bool { e.businessId == businessId })
+    transitEntries.filter(func(e : TransitEntry) : Bool { e.businessId == businessId })
   };
 
   public func addTransitEntry(entry : TransitEntry) : async () {
-    let buf = Buffer.fromArray<TransitEntry>(transitEntries);
+    let buf = List.fromArray<TransitEntry>(transitEntries);
     buf.add(entry);
-    transitEntries := Buffer.toArray(buf);
+    transitEntries := buf.toArray();
   };
 
   public func updateTransitEntry(entry : TransitEntry) : async () {
-    let buf = Buffer.Buffer<TransitEntry>(transitEntries.size());
+    let buf = List.empty<TransitEntry>();
     for (e in transitEntries.vals()) {
       if (e.id == entry.id) buf.add(entry) else buf.add(e);
     };
-    transitEntries := Buffer.toArray(buf);
+    transitEntries := buf.toArray();
   };
 
   public func deleteTransitEntry(id : Text) : async () {
-    transitEntries := Array.filter(transitEntries, func(e : TransitEntry) : Bool { e.id != id });
+    transitEntries := transitEntries.filter(func(e : TransitEntry) : Bool { e.id != id });
   };
 
   // O(1) bilty existence check via hash sets built on demand
-  public func biltyExists(biltyNumber : Text) : async Bool {
+  public query func biltyExists(biltyNumber : Text) : async Bool {
     let ts = buildTransitBiltySet();
     switch (ts.get(biltyNumber)) { case (?_) return true; case null {} };
     let qs = buildQueueBiltySet();
@@ -542,27 +557,27 @@ actor {
   // ---- Queue Entries ----
 
   public query func getQueueEntries(businessId : Text) : async [QueueEntry] {
-    Array.filter(queueEntries, func(e : QueueEntry) : Bool { e.businessId == businessId and not e.delivered })
+    queueEntries.filter(func(e : QueueEntry) : Bool { e.businessId == businessId and not e.delivered })
   };
 
   public func addQueueEntry(entry : QueueEntry) : async () {
-    let buf = Buffer.fromArray<QueueEntry>(queueEntries);
+    let buf = List.fromArray<QueueEntry>(queueEntries);
     buf.add(entry);
-    queueEntries   := Buffer.toArray(buf);
+    queueEntries   := buf.toArray();
     // Remove from transit
-    transitEntries := Array.filter(transitEntries, func(e : TransitEntry) : Bool { e.biltyNumber != entry.biltyNumber });
+    transitEntries := transitEntries.filter(func(e : TransitEntry) : Bool { e.biltyNumber != entry.biltyNumber });
   };
 
   public func updateQueueEntry(entry : QueueEntry) : async () {
-    let buf = Buffer.Buffer<QueueEntry>(queueEntries.size());
+    let buf = List.empty<QueueEntry>();
     for (e in queueEntries.vals()) {
       if (e.id == entry.id) buf.add(entry) else buf.add(e);
     };
-    queueEntries := Buffer.toArray(buf);
+    queueEntries := buf.toArray();
   };
 
   public func markQueueDelivered(id : Text) : async () {
-    let buf = Buffer.Buffer<QueueEntry>(queueEntries.size());
+    let buf = List.empty<QueueEntry>();
     for (e in queueEntries.vals()) {
       if (e.id == id) {
         buf.add({ id = e.id; biltyNumber = e.biltyNumber; transport = e.transport;
@@ -570,71 +585,92 @@ actor {
                   enteredBy = e.enteredBy; createdAt = e.createdAt; delivered = true });
       } else buf.add(e);
     };
-    queueEntries := Buffer.toArray(buf);
+    queueEntries := buf.toArray();
   };
 
   public func deleteQueueEntry(id : Text) : async () {
-    queueEntries := Array.filter(queueEntries, func(e : QueueEntry) : Bool { e.id != id });
+    queueEntries := queueEntries.filter(func(e : QueueEntry) : Bool { e.id != id });
   };
 
   // ---- Inward Saved ----
 
   public query func getInwardSaved(businessId : Text) : async [InwardSavedEntry] {
-    Array.filter(inwardSaved, func(e : InwardSavedEntry) : Bool { e.businessId == businessId })
+    inwardSaved.filter(func(e : InwardSavedEntry) : Bool { e.businessId == businessId })
   };
 
   public func saveInward(entry : InwardSavedEntry) : async () {
-    let exists = Array.find(inwardSaved, func(e : InwardSavedEntry) : Bool { e.id == entry.id });
+    let exists = inwardSaved.find(func(e : InwardSavedEntry) : Bool { e.id == entry.id });
     switch (exists) {
       case (?_) {};
       case null {
-        let buf = Buffer.fromArray<InwardSavedEntry>(inwardSaved);
+        let buf = List.fromArray<InwardSavedEntry>(inwardSaved);
         buf.add(entry);
-        inwardSaved := Buffer.toArray(buf);
+        inwardSaved := buf.toArray();
       };
     };
-    transitEntries := Array.filter(transitEntries, func(e : TransitEntry)  : Bool { e.biltyNumber != entry.biltyNumber });
-    queueEntries   := Array.filter(queueEntries,   func(e : QueueEntry)    : Bool { e.biltyNumber != entry.biltyNumber });
+    transitEntries := transitEntries.filter(func(e : TransitEntry)  : Bool { e.biltyNumber != entry.biltyNumber });
+    queueEntries   := queueEntries.filter(func(e : QueueEntry)    : Bool { e.biltyNumber != entry.biltyNumber });
   };
 
   // restoreInward: used ONLY during System Restore. Unlike saveInward it:
   //  1. Always writes the entry (upsert — overwrite if ID exists, insert if not).
   //  2. Does NOT modify transitEntries or queueEntries (those are restored separately).
   public func restoreInward(entry : InwardSavedEntry) : async () {
-    let exists = Array.find(inwardSaved, func(e : InwardSavedEntry) : Bool { e.id == entry.id });
+    let exists = inwardSaved.find(func(e : InwardSavedEntry) : Bool { e.id == entry.id });
     switch (exists) {
       case (?_) {
         // Overwrite existing entry with the restored version
-        let buf = Buffer.Buffer<InwardSavedEntry>(inwardSaved.size());
+        let buf = List.empty<InwardSavedEntry>();
         for (e in inwardSaved.vals()) {
           if (e.id == entry.id) buf.add(entry) else buf.add(e);
         };
-        inwardSaved := Buffer.toArray(buf);
+        inwardSaved := buf.toArray();
       };
       case null {
-        let buf = Buffer.fromArray<InwardSavedEntry>(inwardSaved);
+        let buf = List.fromArray<InwardSavedEntry>(inwardSaved);
         buf.add(entry);
-        inwardSaved := Buffer.toArray(buf);
+        inwardSaved := buf.toArray();
+      };
+    };
+  };
+
+  // restoreQueueEntry: used ONLY during System Restore. Unlike addQueueEntry it:
+  //  1. Does NOT delete transit entries (no side effects on other tables).
+  //  2. Upsert behavior — overwrites if ID exists, inserts if not.
+  public func restoreQueueEntry(entry : QueueEntry) : async () {
+    let exists = queueEntries.find(func(e : QueueEntry) : Bool { e.id == entry.id });
+    switch (exists) {
+      case (?_) {
+        let buf = List.empty<QueueEntry>();
+        for (e in queueEntries.vals()) {
+          if (e.id == entry.id) buf.add(entry) else buf.add(e);
+        };
+        queueEntries := buf.toArray();
+      };
+      case null {
+        let buf = List.fromArray<QueueEntry>(queueEntries);
+        buf.add(entry);
+        queueEntries := buf.toArray();
       };
     };
   };
 
   public func updateInwardSaved(entry : InwardSavedEntry) : async () {
-    let buf = Buffer.Buffer<InwardSavedEntry>(inwardSaved.size());
+    let buf = List.empty<InwardSavedEntry>();
     for (e in inwardSaved.vals()) {
       if (e.id == entry.id) buf.add(entry) else buf.add(e);
     };
-    inwardSaved := Buffer.toArray(buf);
+    inwardSaved := buf.toArray();
   };
 
   public func deleteInwardSaved(id : Text) : async () {
-    inwardSaved := Array.filter(inwardSaved, func(e : InwardSavedEntry) : Bool { e.id != id });
+    inwardSaved := inwardSaved.filter(func(e : InwardSavedEntry) : Bool { e.id != id });
   };
 
   // ---- Inventory ----
 
   public query func getInventory(businessId : Text) : async [InventoryItem] {
-    Array.filter(inventory, func(i : InventoryItem) : Bool {
+    inventory.filter(func(i : InventoryItem) : Bool {
       i.businessId == businessId or (i.businessId == "" and businessId == "b1")
     })
   };
@@ -645,42 +681,42 @@ actor {
     switch (idx.get(k)) {
       case (?pos) {
         // Overwrite existing
-        let buf = Buffer.fromArray<InventoryItem>(inventory);
+        let buf = List.fromArray<InventoryItem>(inventory);
         buf.put(pos, item);
-        inventory := Buffer.toArray(buf);
+        inventory := buf.toArray();
       };
       case null {
-        let buf = Buffer.fromArray<InventoryItem>(inventory);
+        let buf = List.fromArray<InventoryItem>(inventory);
         buf.add(item);
-        inventory := Buffer.toArray(buf);
+        inventory := buf.toArray();
       };
     };
   };
 
   public func updateInventoryItem(item : InventoryItem) : async () {
-    let buf = Buffer.Buffer<InventoryItem>(inventory.size());
+    let buf = List.empty<InventoryItem>();
     for (i in inventory.vals()) {
       if (i.id == item.id) buf.add(item) else buf.add(i);
     };
-    inventory := Buffer.toArray(buf);
+    inventory := buf.toArray();
   };
 
   public func deleteInventoryItem(id : Text) : async () {
-    inventory := Array.filter(inventory, func(i : InventoryItem) : Bool { i.id != id });
+    inventory := inventory.filter(func(i : InventoryItem) : Bool { i.id != id });
   };
 
-  func applyInventoryAddition(businessId : Text, item : InwardItem) {
+  func _applyInventoryAddition(businessId : Text, item : InwardItem) {
     let k   = invKey(businessId, item.category, item.itemName, item.subCategory);
     let idx = buildInventoryIndex();
     switch (idx.get(k)) {
       case null {
-        let buf = Buffer.fromArray<InventoryItem>(inventory);
+        let buf = List.fromArray<InventoryItem>(inventory);
         buf.add({
           id = k; businessId; category = item.category; itemName = item.itemName;
           subCategory = item.subCategory; godownQtys = item.godownQtys;
           shopQty = item.shopQty; purchaseRate = item.purchaseRate; saleRate = item.saleRate;
         });
-        inventory := Buffer.toArray(buf);
+        inventory := buf.toArray();
       };
       case (?pos) {
         let inv = inventory[pos];
@@ -691,18 +727,18 @@ actor {
           let prev = switch (gMap.get(gq.godownId)) { case (?v) v; case null 0 };
           gMap.put(gq.godownId, prev + gq.qty);
         };
-        let merged = Buffer.Buffer<GodownQty>(gMap.size());
+        let merged = List.empty<GodownQty>();
         for ((gId, qty) in gMap.entries()) { merged.add({ godownId = gId; qty }) };
         let updated : InventoryItem = {
           id = inv.id; businessId = inv.businessId; category = inv.category;
           itemName = inv.itemName; subCategory = inv.subCategory;
-          godownQtys = Buffer.toArray(merged);
+          godownQtys = merged.toArray();
           shopQty = inv.shopQty + item.shopQty;
           purchaseRate = item.purchaseRate; saleRate = item.saleRate;
         };
-        let buf = Buffer.fromArray<InventoryItem>(inventory);
+        let buf = List.fromArray<InventoryItem>(inventory);
         buf.put(pos, updated);
-        inventory := Buffer.toArray(buf);
+        inventory := buf.toArray();
       };
     };
   };
@@ -710,7 +746,7 @@ actor {
   // ---- Transfers ----
 
   public query func getTransfers(businessId : Text) : async [TransferEntry] {
-    Array.filter(transfers, func(t : TransferEntry) : Bool { t.businessId == businessId })
+    transfers.filter(func(t : TransferEntry) : Bool { t.businessId == businessId })
   };
 
   public func postTransfer(entry : TransferEntry) : async Text {
@@ -722,7 +758,7 @@ actor {
         let item = inventory[pos];
         if (entry.fromType == "godown") {
           var found = false;
-          let newGQ = Buffer.Buffer<GodownQty>(item.godownQtys.size());
+          let newGQ = List.empty<GodownQty>();
           for (g in item.godownQtys.vals()) {
             if (g.godownId == entry.fromId) {
               if (g.qty < entry.qty) return "Insufficient godown stock";
@@ -731,30 +767,30 @@ actor {
             } else newGQ.add(g);
           };
           if (not found) return "Godown not found";
-          let buf = Buffer.fromArray<InventoryItem>(inventory);
+          let buf = List.fromArray<InventoryItem>(inventory);
           buf.put(pos, { id = item.id; businessId = item.businessId; category = item.category;
             itemName = item.itemName; subCategory = item.subCategory;
-            godownQtys = Buffer.toArray(newGQ); shopQty = item.shopQty + entry.qty;
+            godownQtys = newGQ.toArray(); shopQty = item.shopQty + entry.qty;
             purchaseRate = item.purchaseRate; saleRate = item.saleRate });
-          inventory := Buffer.toArray(buf);
+          inventory := buf.toArray();
         } else {
           if (item.shopQty < entry.qty) return "Insufficient shop stock";
-          let newGQ = Buffer.Buffer<GodownQty>(item.godownQtys.size());
+          let newGQ = List.empty<GodownQty>();
           for (g in item.godownQtys.vals()) {
             if (g.godownId == entry.toId) newGQ.add({ godownId = g.godownId; qty = g.qty + entry.qty })
             else newGQ.add(g);
           };
-          let buf = Buffer.fromArray<InventoryItem>(inventory);
+          let buf = List.fromArray<InventoryItem>(inventory);
           buf.put(pos, { id = item.id; businessId = item.businessId; category = item.category;
             itemName = item.itemName; subCategory = item.subCategory;
-            godownQtys = Buffer.toArray(newGQ); shopQty = item.shopQty - entry.qty;
+            godownQtys = newGQ.toArray(); shopQty = item.shopQty - entry.qty;
             purchaseRate = item.purchaseRate; saleRate = item.saleRate });
-          inventory := Buffer.toArray(buf);
+          inventory := buf.toArray();
         };
-        let tbuf = Buffer.fromArray<TransferEntry>(transfers);
+        let tbuf = List.fromArray<TransferEntry>(transfers);
         tbuf.add(entry);
-        transfers := Buffer.toArray(tbuf);
-        let hbuf = Buffer.fromArray<TxRecord>(txHistory);
+        transfers := tbuf.toArray();
+        let hbuf = List.fromArray<TxRecord>(txHistory);
         hbuf.add({
           id = entry.id; businessId = entry.businessId; txType = #transfer;
           biltyNumber = ""; category = entry.category; itemName = entry.itemName;
@@ -764,7 +800,7 @@ actor {
           transport = ""; qty = entry.qty; rate = entry.rate;
           enteredBy = entry.transferredBy; notes = "transfer"; createdAt = entry.createdAt;
         });
-        txHistory := Buffer.toArray(hbuf);
+        txHistory := hbuf.toArray();
         return "ok";
       };
     };
@@ -773,23 +809,23 @@ actor {
   // ---- Deliveries ----
 
   public query func getDeliveries(businessId : Text) : async [DeliveryEntry] {
-    Array.filter(deliveries, func(d : DeliveryEntry) : Bool { d.businessId == businessId })
+    deliveries.filter(func(d : DeliveryEntry) : Bool { d.businessId == businessId })
   };
 
   public func addDelivery(entry : DeliveryEntry) : async Text {
     // Build index once for all items in this delivery
     let idx = buildInventoryIndex();
-    let invBuf = Buffer.fromArray<InventoryItem>(inventory);
-    let hbuf   = Buffer.fromArray<TxRecord>(txHistory);
+    let invBuf = List.fromArray<InventoryItem>(inventory);
+    let hbuf   = List.fromArray<TxRecord>(txHistory);
 
     for (item in entry.items.vals()) {
       let k = invKey(entry.businessId, item.category, item.itemName, item.subCategory);
       switch (idx.get(k)) {
         case null {};
         case (?pos) {
-          let existing = invBuf.get(pos);
+          let existing = invBuf.at(pos);
           var found = false;
-          let newGQ = Buffer.Buffer<GodownQty>(existing.godownQtys.size());
+          let newGQ = List.empty<GodownQty>();
           for (g in existing.godownQtys.vals()) {
             if (g.godownId == item.godownId) {
               if (g.qty < item.qty) return "Insufficient stock in godown";
@@ -801,7 +837,7 @@ actor {
             invBuf.put(pos, {
               id = existing.id; businessId = existing.businessId; category = existing.category;
               itemName = existing.itemName; subCategory = existing.subCategory;
-              godownQtys = Buffer.toArray(newGQ); shopQty = existing.shopQty + item.qty;
+              godownQtys = newGQ.toArray(); shopQty = existing.shopQty + item.qty;
               purchaseRate = existing.purchaseRate; saleRate = existing.saleRate;
             });
           };
@@ -816,15 +852,15 @@ actor {
       });
     };
 
-    inventory := Buffer.toArray(invBuf);
-    txHistory := Buffer.toArray(hbuf);
+    inventory := invBuf.toArray();
+    txHistory := hbuf.toArray();
 
-    let dbuf = Buffer.fromArray<DeliveryEntry>(deliveries);
+    let dbuf = List.fromArray<DeliveryEntry>(deliveries);
     dbuf.add(entry);
-    deliveries := Buffer.toArray(dbuf);
+    deliveries := dbuf.toArray();
 
     if (entry.deliveryType == "queue" and entry.biltyNumber != "") {
-      let qbuf = Buffer.Buffer<QueueEntry>(queueEntries.size());
+      let qbuf = List.empty<QueueEntry>();
       for (e in queueEntries.vals()) {
         if (e.biltyNumber == entry.biltyNumber) {
           qbuf.add({ id = e.id; biltyNumber = e.biltyNumber; transport = e.transport;
@@ -832,41 +868,41 @@ actor {
                      enteredBy = e.enteredBy; createdAt = e.createdAt; delivered = true });
         } else qbuf.add(e);
       };
-      queueEntries := Buffer.toArray(qbuf);
+      queueEntries := qbuf.toArray();
     };
     "ok"
   };
   // Delete a delivery record by id (does NOT touch inventory or txHistory).
   public func deleteDelivery(id : Text) : async () {
-    deliveries := Array.filter(deliveries, func(d : DeliveryEntry) : Bool { d.id != id });
+    deliveries := deliveries.filter(func(d : DeliveryEntry) : Bool { d.id != id });
   };
 
   // Restore a delivery record without applying stock-side effects.
   // Use this during backup restore so that inventory (already restored) is not touched again.
   public func restoreDelivery(entry : DeliveryEntry) : async () {
-    let dbuf = Buffer.fromArray<DeliveryEntry>(deliveries);
+    let dbuf = List.fromArray<DeliveryEntry>(deliveries);
     dbuf.add(entry);
-    deliveries := Buffer.toArray(dbuf);
+    deliveries := dbuf.toArray();
   };
 
   // ---- Sales ----
 
   public query func getSales(businessId : Text) : async [SaleEntry] {
-    Array.filter(sales, func(s : SaleEntry) : Bool { s.businessId == businessId })
+    sales.filter(func(s : SaleEntry) : Bool { s.businessId == businessId })
   };
 
   public func addSale(entry : SaleEntry) : async Text {
     // Build index once for all items in this sale
     let idx    = buildInventoryIndex();
-    let invBuf = Buffer.fromArray<InventoryItem>(inventory);
-    let hbuf   = Buffer.fromArray<TxRecord>(txHistory);
+    let invBuf = List.fromArray<InventoryItem>(inventory);
+    let hbuf   = List.fromArray<TxRecord>(txHistory);
 
     for (item in entry.items.vals()) {
       let k = invKey(entry.businessId, item.category, item.itemName, item.subCategory);
       switch (idx.get(k)) {
         case null return "Item not found: " # item.itemName;
         case (?pos) {
-          let existing = invBuf.get(pos);
+          let existing = invBuf.at(pos);
           if (existing.shopQty < item.qty) return "Insufficient shop stock for: " # item.itemName;
           invBuf.put(pos, {
             id = existing.id; businessId = existing.businessId; category = existing.category;
@@ -885,41 +921,41 @@ actor {
       });
     };
 
-    inventory := Buffer.toArray(invBuf);
-    txHistory := Buffer.toArray(hbuf);
+    inventory := invBuf.toArray();
+    txHistory := hbuf.toArray();
 
-    let sbuf = Buffer.fromArray<SaleEntry>(sales);
+    let sbuf = List.fromArray<SaleEntry>(sales);
     sbuf.add(entry);
-    sales := Buffer.toArray(sbuf);
+    sales := sbuf.toArray();
     "ok"
   };
 
   public func deleteSale(id : Text) : async () {
-    sales := Array.filter(sales, func(s : SaleEntry) : Bool { s.id != id });
+    sales := sales.filter(func(s : SaleEntry) : Bool { s.id != id });
   };
 
   // Restore a sale record without applying inventory side effects.
   // Use this during backup restore so inventory (already restored) is not touched again.
   public func restoreSale(entry : SaleEntry) : async () {
-    let buf = Buffer.fromArray<SaleEntry>(sales);
+    let buf = List.fromArray<SaleEntry>(sales);
     buf.add(entry);
-    sales := Buffer.toArray(buf);
+    sales := buf.toArray();
   };
 
   // ---- TX History ----
 
   public query func getTxHistory(businessId : Text) : async [TxRecord] {
-    Array.filter(txHistory, func(t : TxRecord) : Bool { t.businessId == businessId })
+    txHistory.filter(func(t : TxRecord) : Bool { t.businessId == businessId })
   };
 
   public func addTxRecord(record : TxRecord) : async () {
-    let buf = Buffer.fromArray<TxRecord>(txHistory);
+    let buf = List.fromArray<TxRecord>(txHistory);
     buf.add(record);
-    txHistory := Buffer.toArray(buf);
+    txHistory := buf.toArray();
   };
 
   public func deleteTxRecord(id : Text) : async () {
-    txHistory := Array.filter(txHistory, func(t : TxRecord) : Bool { t.id != id });
+    txHistory := txHistory.filter(func(t : TxRecord) : Bool { t.id != id });
   };
 
   // ---- App Settings ----
@@ -934,6 +970,82 @@ actor {
 
   public shared ({ caller }) func getCurrentUser() : async Text {
     caller.toText()
+  };
+
+
+  // Batch upsert for inventory items — builds the index once for all items.
+  // Use this instead of calling addInventoryItem N times to avoid N index rebuilds.
+  public func batchAddInventoryItems(items : [InventoryItem]) : async () {
+    let idx = buildInventoryIndex();
+    let buf = List.fromArray<InventoryItem>(inventory);
+    for (item in items.vals()) {
+      let k = invKey(item.businessId, item.category, item.itemName, item.subCategory);
+      switch (idx.get(k)) {
+        case (?pos) {
+          buf.put(pos, item);
+        };
+        case null {
+          idx.put(k, buf.size());
+          buf.add(item);
+        };
+      };
+    };
+    inventory := buf.toArray();
+  };
+
+
+  // Batch apply inward items — builds the inventory index ONCE for all items.
+  // Use this instead of calling applyInventoryAddition N times (which rebuilds index N times).
+  // Identical merge logic to applyInventoryAddition but batched.
+  public func batchSaveInwardItems(businessId : Text, items : [InwardItem]) : async () {
+    let idx = buildInventoryIndex();
+    let buf = List.fromArray<InventoryItem>(inventory);
+    for (item in items.vals()) {
+      let k = invKey(businessId, item.category, item.itemName, item.subCategory);
+      switch (idx.get(k)) {
+        case null {
+          let pos = buf.size();
+          buf.add({
+            id = k; businessId; category = item.category; itemName = item.itemName;
+            subCategory = item.subCategory; godownQtys = item.godownQtys;
+            shopQty = item.shopQty; purchaseRate = item.purchaseRate; saleRate = item.saleRate;
+          });
+          idx.put(k, pos);
+        };
+        case (?pos) {
+          let inv = buf.at(pos);
+          let gMap = HashMap.HashMap<Text, Int>(inv.godownQtys.size() + 1, Text.equal, Text.hash);
+          for (gq in inv.godownQtys.vals())  { gMap.put(gq.godownId, gq.qty) };
+          for (gq in item.godownQtys.vals()) {
+            let prev = switch (gMap.get(gq.godownId)) { case (?v) v; case null 0 };
+            gMap.put(gq.godownId, prev + gq.qty);
+          };
+          let merged = List.empty<GodownQty>();
+          for ((gId, qty) in gMap.entries()) { merged.add({ godownId = gId; qty }) };
+          buf.put(pos, {
+            id = inv.id; businessId = inv.businessId; category = inv.category;
+            itemName = inv.itemName; subCategory = inv.subCategory;
+            godownQtys = merged.toArray();
+            shopQty = inv.shopQty + item.shopQty;
+            purchaseRate = item.purchaseRate; saleRate = item.saleRate;
+          });
+        };
+      };
+    };
+    inventory := buf.toArray();
+  };
+
+  // ---- Upgrade migration ----
+  system func postupgrade() {
+    // Migrate biltyPrefixes (old shape: no businessId) into biltyPrefixesV2 (with businessId)
+    if (biltyPrefixes.size() > 0 and biltyPrefixesV2.size() == 0) {
+      let buf = List.empty<BiltyPrefix>();
+      for (p in biltyPrefixes.vals()) {
+        buf.add({ id = p.id; prefix = p.prefix; businessId = "" });
+      };
+      biltyPrefixesV2 := buf.toArray();
+      biltyPrefixes := [];
+    };
   };
 
 };

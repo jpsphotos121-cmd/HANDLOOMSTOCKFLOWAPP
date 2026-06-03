@@ -123,7 +123,7 @@ function toBackendTransit(t: TransitRecord): BackendTransitEntry {
     biltyDate: t.date ?? "",
     businessId: t.businessId ?? "b1",
     enteredBy: t.addedBy ?? "",
-    createdAt: BigInt(Date.now()),
+    createdAt: t.date ? BigInt(new Date(t.date).getTime()) : BigInt(Date.now()),
   };
 }
 function fromBackendTransit(e: BackendTransitEntry): TransitRecord {
@@ -211,23 +211,39 @@ function toBackendInwardSaved(
       subCategory: JSON.stringify({
         attributes: item.attributes,
         godownQty: item.godownQty,
+        godownBreakdown:
+          item.godownBreakdown && Object.keys(item.godownBreakdown).length > 0
+            ? item.godownBreakdown
+            : (item as any).godownQuants &&
+                Object.keys((item as any).godownQuants).length > 0
+              ? (item as any).godownQuants
+              : null,
       }),
-      totalQty: BigInt(Math.round(item.qty)),
-      shopQty: BigInt(Math.round(item.shopQty)),
+      totalQty: BigInt(Math.round(item.qty || 0)),
+      shopQty: BigInt(Math.round(item.shopQty || 0)),
       purchaseRate: item.purchaseRate,
       saleRate: item.saleRate,
-      godownQtys:
-        item.godownBreakdown && Object.keys(item.godownBreakdown).length > 0
-          ? Object.entries(item.godownBreakdown).map(([godownId, qty]) => ({
-              godownId,
-              qty: BigInt(Math.round(qty)),
-            }))
-          : [
-              {
-                godownId: "Main Godown",
-                qty: BigInt(Math.round(item.godownQty)),
-              },
-            ],
+      godownQtys: (() => {
+        const breakdown =
+          item.godownBreakdown && Object.keys(item.godownBreakdown).length > 0
+            ? item.godownBreakdown
+            : (item as any).godownQuants &&
+                Object.keys((item as any).godownQuants).length > 0
+              ? (item as any).godownQuants
+              : null;
+        if (breakdown) {
+          return Object.entries(breakdown).map(([godownId, qty]) => ({
+            godownId,
+            qty: BigInt(Math.round(Number(qty) || 0)),
+          }));
+        }
+        return [
+          {
+            godownId: "Main Godown",
+            qty: BigInt(Math.round(item.godownQty || 0)),
+          },
+        ];
+      })(),
     })),
   };
 }
@@ -245,17 +261,33 @@ function fromBackendInwardSaved(e: BackendInwardSavedEntry): InwardSavedEntry {
     items: e.items.map((item: InwardItem) => {
       let attrs: Record<string, string> = {};
       let godownQty = Number(item.godownQtys[0]?.qty || 0n);
+      let savedGodownBreakdown: Record<string, number> | null = null;
       try {
         const m = JSON.parse(item.subCategory);
         if (m.attributes) attrs = m.attributes;
         if (m.godownQty != null) godownQty = Number(m.godownQty);
+        if (m.godownBreakdown && typeof m.godownBreakdown === "object") {
+          savedGodownBreakdown = m.godownBreakdown as Record<string, number>;
+        }
       } catch {
         /* */
       }
-      const godownBreakdown: Record<string, number> = {};
+      // Build godownBreakdown from godownQtys first
+      const godownBreakdownFromQtys: Record<string, number> = {};
       for (const gq of item.godownQtys || []) {
-        godownBreakdown[gq.godownId] = Number(gq.qty);
+        godownBreakdownFromQtys[gq.godownId] = Number(gq.qty);
       }
+      // If godownQtys only has "Main Godown" (collapsed fallback) but subCategory has
+      // the real multi-godown breakdown, prefer the one from subCategory
+      const godownQtysKeys = Object.keys(godownBreakdownFromQtys);
+      const isCollapsed =
+        godownQtysKeys.length === 1 && godownQtysKeys[0] === "Main Godown";
+      const godownBreakdown: Record<string, number> =
+        isCollapsed &&
+        savedGodownBreakdown &&
+        Object.keys(savedGodownBreakdown).length > 1
+          ? savedGodownBreakdown
+          : godownBreakdownFromQtys;
       return {
         category: item.category,
         itemName: item.itemName,
@@ -360,6 +392,24 @@ function fromBackendTxRecord(e: TxRecord): Transaction {
     typeMap[txTypeName] ??
     typeMap[txTypeName.toLowerCase()] ??
     txTypeName.toUpperCase();
+  // Restore baleItemsList from subCategory JSON if present
+  let baleItemsList: any[] | undefined;
+  let cleanSubCategory: string | undefined = e.subCategory || undefined;
+  if (e.subCategory) {
+    try {
+      const parsed = JSON.parse(e.subCategory);
+      if (parsed._baleItems) {
+        baleItemsList = parsed._baleItems;
+        // Re-serialize without _baleItems for display
+        const { _baleItems: _, ...rest } = parsed;
+        cleanSubCategory =
+          Object.keys(rest).length > 0 ? JSON.stringify(rest) : undefined;
+      }
+    } catch {
+      /* not JSON, keep as-is */
+    }
+  }
+
   return {
     id: Number.parseInt(e.id) || Math.floor(Math.random() * 1_000_000),
     type: resolvedType,
@@ -373,8 +423,9 @@ function fromBackendTxRecord(e: TxRecord): Transaction {
     notes: e.notes || undefined,
     fromLocation: e.fromLocation || undefined,
     toLocation: e.toLocation || undefined,
-    subCategory: e.subCategory || undefined,
+    subCategory: cleanSubCategory,
     itemsCount: Number(e.qty) || undefined,
+    baleItemsList,
   };
 }
 function toBackendTxRecord(t: Transaction): TxRecord {
@@ -386,6 +437,19 @@ function toBackendTxRecord(t: Transaction): TxRecord {
     if (u === "DIRECTSTOCK") return { directStock: null };
     return { inward: null };
   };
+  // Encode baleItemsList into subCategory JSON so it survives backend round-trip
+  let subCategoryStr = t.subCategory || "";
+  if ((t as any).baleItemsList && (t as any).baleItemsList.length > 0) {
+    try {
+      const existing = subCategoryStr ? JSON.parse(subCategoryStr) : {};
+      subCategoryStr = JSON.stringify({
+        ...existing,
+        _baleItems: (t as any).baleItemsList,
+      });
+    } catch {
+      subCategoryStr = JSON.stringify({ _baleItems: (t as any).baleItemsList });
+    }
+  }
   return {
     id: String(t.id),
     businessId: t.businessId ?? "b1",
@@ -393,7 +457,7 @@ function toBackendTxRecord(t: Transaction): TxRecord {
     biltyNumber: t.biltyNo || "",
     category: t.category || "",
     itemName: t.itemName || "",
-    subCategory: t.subCategory || "",
+    subCategory: subCategoryStr,
     fromLocation: t.fromLocation || "",
     toLocation: t.toLocation || "",
     transport: t.transportName || "",
@@ -1562,6 +1626,26 @@ export default function App() {
             ),
           ];
         }
+        // FIX: Fetch pendingParcels (queue entries) from backend — not from React state
+        // which could be stale if the user loaded the page on a different business.
+        freshPendingParcels = [];
+        const queueResults = await Promise.all(
+          allBusinessIds.map((bId) => (actor as any).getQueueEntries(bId)),
+        );
+        for (const result of queueResults) {
+          freshPendingParcels = [
+            ...freshPendingParcels,
+            ...(result as any[])
+              .filter((e) => !e.delivered)
+              .flatMap((e) => {
+                try {
+                  return [fromBackendQueue(e)];
+                } catch {
+                  return [];
+                }
+              }),
+          ];
+        }
         // Fetch deliveryRecords from backend (avoids stale React state)
         freshDeliveryRecords = [];
         const deliveryResults = await Promise.all(
@@ -1577,25 +1661,6 @@ export default function App() {
                 return [];
               }
             }),
-          ];
-        }
-        // Fetch pendingParcels (queue) from backend
-        freshPendingParcels = [];
-        const queueResults = await Promise.all(
-          allBusinessIds.map((bId) => (actor as any).getQueueEntries(bId)),
-        );
-        for (const result of queueResults) {
-          freshPendingParcels = [
-            ...freshPendingParcels,
-            ...(result as BackendQueueEntry[])
-              .filter((e) => !e.delivered)
-              .flatMap((e) => {
-                try {
-                  return [fromBackendQueue(e)];
-                } catch {
-                  return [];
-                }
-              }),
           ];
         }
       } catch (_err) {
@@ -1640,65 +1705,42 @@ export default function App() {
   const onResetAllData = async () => {
     if (!actor) return;
     const allBizIds = businesses.map((b) => b.id);
-    // Collect all IDs from backend, then delete in parallel
-    const [
-      existingTransit,
-      existingQueue,
-      existingInward,
-      existingDeliveries,
-      existingTxs,
-      existingSales,
-      ...invArrays
-    ] = await Promise.all([
-      ...(allBizIds.flatMap((bId) => [
-        (actor as any).getTransitEntries(bId),
-        (actor as any).getQueueEntries(bId),
-        (actor as any).getInwardSaved(bId),
-        (actor as any).getDeliveries(bId),
-        (actor as any).getTxHistory(bId),
-        (actor as any).getSales(bId),
-      ]) as Promise<any[]>[]),
-      ...allBizIds.map(
-        (bId) => (actor as any).getInventory(bId) as Promise<any[]>,
-      ),
-    ]);
-    // Flatten per-business arrays (6 arrays per business before inv)
-    const perBizCount = 6;
-    const flatTransit: any[] = [];
-    const flatQueue: any[] = [];
-    const flatInward: any[] = [];
-    const flatDeliveries: any[] = [];
-    const flatTxs: any[] = [];
-    const flatSales: any[] = [];
-    const results = [
-      existingTransit,
-      existingQueue,
-      existingInward,
-      existingDeliveries,
-      existingTxs,
-      existingSales,
-      ...invArrays,
-    ];
-    for (let i = 0; i < allBizIds.length; i++) {
-      flatTransit.push(...(results[i * perBizCount] as any[]));
-      flatQueue.push(...(results[i * perBizCount + 1] as any[]));
-      flatInward.push(...(results[i * perBizCount + 2] as any[]));
-      flatDeliveries.push(...(results[i * perBizCount + 3] as any[]));
-      flatTxs.push(...(results[i * perBizCount + 4] as any[]));
-      flatSales.push(...(results[i * perBizCount + 5] as any[]));
-    }
-    const flatInv = (invArrays as any[][]).flat();
-    await Promise.all([
-      ...flatTransit.map((e: any) => (actor as any).deleteTransitEntry(e.id)),
-      ...flatQueue.map((e: any) =>
-        (actor as any).deleteQueueEntry(String(e.id)),
-      ),
-      ...flatInward.map((e: any) => (actor as any).deleteInwardSaved(e.id)),
-      ...flatDeliveries.map((e: any) => (actor as any).deleteDelivery(e.id)),
-      ...flatTxs.map((e: any) => (actor as any).deleteTxRecord(e.id)),
-      ...flatSales.map((e: any) => (actor as any).deleteSale(e.id)),
-      ...flatInv.map((e: any) => (actor as any).deleteInventoryItem(e.id)),
-    ]);
+    // FIX: Fetch each data type separately per-business to avoid destructuring
+    // bugs when there are multiple businesses. Previously a single flatMap+destructure
+    // incorrectly mapped results for biz[1+] to wrong data type slots.
+    const perBizResults = await Promise.all(
+      allBizIds.map(async (bId) => ({
+        transit: (await (actor as any).getTransitEntries(bId)) as any[],
+        queue: (await (actor as any).getQueueEntries(bId)) as any[],
+        inward: (await (actor as any).getInwardSaved(bId)) as any[],
+        deliveries: (await (actor as any).getDeliveries(bId)) as any[],
+        txs: (await (actor as any).getTxHistory(bId)) as any[],
+        sales: (await (actor as any).getSales(bId)) as any[],
+        inventory: (await (actor as any).getInventory(bId)) as any[],
+      })),
+    );
+    const flatTransit = perBizResults.flatMap((r) => r.transit);
+    const flatQueue = perBizResults.flatMap((r) => r.queue);
+    const flatInward = perBizResults.flatMap((r) => r.inward);
+    const flatDeliveries = perBizResults.flatMap((r) => r.deliveries);
+    const flatTxs = perBizResults.flatMap((r) => r.txs);
+    const flatSales = perBizResults.flatMap((r) => r.sales);
+    const flatInv = perBizResults.flatMap((r) => r.inventory);
+    // Sequential deletes — avoids IC ingress rate-limit rejections from simultaneous calls
+    for (const e of flatTransit)
+      await (actor as any).deleteTransitEntry(e.id).catch(() => {});
+    for (const e of flatQueue)
+      await (actor as any).deleteQueueEntry(String(e.id)).catch(() => {});
+    for (const e of flatInward)
+      await (actor as any).deleteInwardSaved(e.id).catch(() => {});
+    for (const e of flatDeliveries)
+      await (actor as any).deleteDelivery(e.id).catch(() => {});
+    for (const e of flatTxs)
+      await (actor as any).deleteTxRecord(e.id).catch(() => {});
+    for (const e of flatSales)
+      await (actor as any).deleteSale(e.id).catch(() => {});
+    for (const e of flatInv)
+      await (actor as any).deleteInventoryItem(e.id).catch(() => {});
   };
 
   const importDatabase = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1737,87 +1779,119 @@ export default function App() {
           return;
         }
         showNotification("Syncing restore to backend — please wait...", "info");
-        // Use a local const to avoid stale React state closure
         const restoreBizId =
           (data.activeBusinessId as string) || activeBusinessId;
-        // 2. Save app settings to Motoko
-        const settings = {
-          fieldLabels: data.fieldLabels || {},
-          requiredFields: data.requiredFields || {},
-          fieldOrder: data.fieldOrder || {},
-          fieldTypes: data.fieldTypes || {},
-          fieldComboOptions: data.fieldComboOptions || {},
-        };
-        await (actor as any).saveAppSettings(JSON.stringify(settings));
-        // 2b. Restore users to backend
-        if (data.users && Array.isArray(data.users)) {
-          const existingUsers = await actor.getUsers();
-          await Promise.all(
-            existingUsers.map((u: any) => actor.deleteUser(u.id)),
-          );
-          for (const u of data.users as AppUser[]) {
-            const uid = (u as any)._backendId || u.username;
-            await actor.addUser(
-              uid,
-              u.username,
-              u.password,
-              toBackendRole(u.role),
-              u.assignedBusinessIds || [],
-            );
-          }
+
+        // 2. Save app settings (non-critical)
+        try {
+          const settings = {
+            fieldLabels: data.fieldLabels || {},
+            requiredFields: data.requiredFields || {},
+            fieldOrder: data.fieldOrder || {},
+            fieldTypes: data.fieldTypes || {},
+            fieldComboOptions: data.fieldComboOptions || {},
+          };
+          await (actor as any).saveAppSettings(JSON.stringify(settings));
+        } catch (settErr) {
+          console.warn("Settings restore failed (non-critical):", settErr);
         }
-        // 2c. Restore businesses to backend
-        if (data.businesses && Array.isArray(data.businesses)) {
-          const existingBizs = await actor.getBusinesses();
-          await Promise.all(
-            existingBizs.map((b: any) => actor.deleteBusiness(b.id)),
-          );
-          for (const b of data.businesses as Business[]) {
-            await actor.addBusiness(b.id, b.name);
-          }
-        }
-        // 2d. Restore bilty prefixes to backend
-        if (data.biltyPrefixes && Array.isArray(data.biltyPrefixes)) {
-          const existingPrefixes = await actor.getBiltyPrefixes();
-          await Promise.all(
-            existingPrefixes.map((p: any) => actor.deleteBiltyPrefix(p.id)),
-          );
-          for (const prefix of data.biltyPrefixes as string[]) {
-            await actor.addBiltyPrefix(prefix, prefix);
-          }
-        }
-        // 3. Clear existing categories and restore from backup
-        const existingCats = await (actor as any).getCategories();
-        await Promise.all(
-          existingCats.map((c: any) =>
-            (actor as any).deleteCategoryGlobal(c.id),
-          ),
-        );
-        if (data.categories) {
-          for (const cat of data.categories as Category[]) {
-            // Use business-prefixed IDs to prevent cross-business category collisions.
-            // e.g., "safi" in B1 becomes "b1-safi", in B2 becomes "b2-safi".
-            // This ensures deleting in one business never affects another.
-            const catBizId = (cat as any).businessId || restoreBizId;
-            const catId = `${catBizId}-${cat.name.toLowerCase().replace(/\s+/g, "-")}`;
-            await (actor as any).addCategory(catId, cat.name, catBizId);
-            for (const f of cat.fields) {
-              await (actor as any).addSubCategory(catId, {
-                id: f.name.toLowerCase().replace(/\s+/g, "-"),
-                name: f.name,
-                fieldType: f.type,
-                options: f.options || [],
-              });
+
+        // 2b. Restore users sequentially (non-critical)
+        try {
+          if (data.users && Array.isArray(data.users)) {
+            const existingUsers = await actor.getUsers();
+            for (const u of existingUsers) {
+              await actor.deleteUser((u as any).id).catch(() => {});
+            }
+            for (const u of data.users as AppUser[]) {
+              const uid = (u as any)._backendId || u.username;
+              await actor
+                .addUser(
+                  uid,
+                  u.username,
+                  u.password,
+                  toBackendRole(u.role),
+                  u.assignedBusinessIds || [],
+                )
+                .catch(() => {});
             }
           }
+        } catch (usrErr) {
+          console.warn("Users restore failed (non-critical):", usrErr);
         }
-        // 4. Clear & restore inventory
-        if (data.inventory) {
-          // Clear all existing inventory items across all businesses before restoring
+
+        // 2c. Restore businesses sequentially (non-critical)
+        try {
+          if (data.businesses && Array.isArray(data.businesses)) {
+            const existingBizs = await actor.getBusinesses();
+            for (const b of existingBizs) {
+              await actor.deleteBusiness((b as any).id).catch(() => {});
+            }
+            for (const b of data.businesses as Business[]) {
+              await actor.addBusiness(b.id, b.name).catch(() => {});
+            }
+          }
+        } catch (bizErr) {
+          console.warn("Businesses restore failed (non-critical):", bizErr);
+        }
+
+        // 2d. Restore bilty prefixes sequentially (non-critical)
+        try {
+          if (data.biltyPrefixes && Array.isArray(data.biltyPrefixes)) {
+            const existingPrefixes = await actor.getBiltyPrefixes();
+            for (const p of existingPrefixes) {
+              await actor.deleteBiltyPrefix((p as any).id).catch(() => {});
+            }
+            for (const prefix of data.biltyPrefixes as string[]) {
+              await actor.addBiltyPrefix(prefix, prefix).catch(() => {});
+            }
+          }
+        } catch (prefErr) {
+          console.warn(
+            "Bilty prefixes restore failed (non-critical):",
+            prefErr,
+          );
+        }
+
+        // 3. Clear & restore categories sequentially (non-critical)
+        try {
+          const existingCats = await (actor as any).getCategories();
+          for (const c of existingCats) {
+            await (actor as any).deleteCategoryGlobal(c.id).catch(() => {});
+          }
+          if (data.categories) {
+            for (const cat of data.categories as Category[]) {
+              const catBizId = (cat as any).businessId || restoreBizId;
+              const catId = `${catBizId}-${cat.name.toLowerCase().replace(/\s+/g, "-")}`;
+              await (actor as any)
+                .addCategory(catId, cat.name, catBizId)
+                .catch(() => {});
+              for (const f of cat.fields) {
+                await (actor as any)
+                  .addSubCategory(catId, {
+                    id: f.name.toLowerCase().replace(/\s+/g, "-"),
+                    name: f.name,
+                    fieldType: f.type,
+                    options: f.options || [],
+                  })
+                  .catch(() => {});
+              }
+            }
+          }
+        } catch (catErr) {
+          console.warn(
+            "Categories restore partial failure (non-critical):",
+            catErr,
+          );
+        }
+
+        // 4. Clear & restore inventory sequentially
+        try {
           const allBizIdsForInv: string[] =
             data.businesses && Array.isArray(data.businesses)
               ? (data.businesses as any[]).map((b: any) => b.id || b)
               : businesses.map((b) => b.id);
+          // Reads can stay parallel — queries are not rate-limited
           const existingInvItems = (
             await Promise.all(
               allBizIdsForInv.map((bId: string) =>
@@ -1825,210 +1899,281 @@ export default function App() {
               ),
             )
           ).flat();
-          await Promise.all(
-            existingInvItems.map((item: any) =>
-              (actor as any).deleteInventoryItem(item.id),
-            ),
-          );
-          await Promise.all(
-            Object.values(data.inventory as Record<string, InventoryItem>).map(
-              (item) =>
-                (actor as any).addInventoryItem(
-                  toBackendInventory(item, restoreBizId),
-                ),
-            ),
-          );
+          // Writes must be sequential
+          for (const item of existingInvItems) {
+            await (actor as any)
+              .deleteInventoryItem((item as any).id)
+              .catch(() => {});
+          }
+          if (data.inventory) {
+            for (const item of Object.values(
+              data.inventory as Record<string, InventoryItem>,
+            )) {
+              await (actor as any)
+                .addInventoryItem(toBackendInventory(item, restoreBizId))
+                .catch(() => {});
+            }
+          }
+        } catch (invErr) {
+          console.warn("Inventory restore partial failure:", invErr);
         }
-        // 5. Clear & restore transit entries
+
         const bizIds: string[] = (data.businesses || businesses).map(
           (b: any) => b.id || b,
         );
-        const existingTransit = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getTransitEntries(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingTransit.map((e: any) =>
-            (actor as any).deleteTransitEntry(e.id),
-          ),
-        );
-        if (data.transitGoods) {
-          await Promise.all(
-            (data.transitGoods as TransitRecord[]).map((t) =>
-              (actor as any).addTransitEntry(toBackendTransit(t)),
-            ),
-          );
+
+        // Fetch ALL business IDs currently stored in the canister.
+        // This is different from bizIds (backup's business IDs).
+        // We use allCanisterBizIds for DELETION so we sweep orphaned records
+        // from any previous restore that used a different set of business IDs.
+        // We use bizIds (backup's biz IDs) only when WRITING data back.
+        let allCanisterBizIds: string[] = bizIds;
+        try {
+          const canisterBizList = await actor.getBusinesses();
+          if (canisterBizList.length > 0) {
+            allCanisterBizIds = canisterBizList.map((b: any) => b.id);
+          }
+        } catch (_) {
+          // fallback to bizIds if getBusinesses fails
         }
-        // 6. Clear & restore transaction history
-        const existingTxs = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getTxHistory(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingTxs.map((t: any) => (actor as any).deleteTxRecord(t.id)),
-        );
-        if (data.transactions) {
-          await Promise.all(
-            (data.transactions as Transaction[]).map((t) =>
-              (actor as any).addTxRecord(toBackendTxRecord(t)),
-            ),
-          );
+
+        // 5. Clear & restore transit entries sequentially
+        try {
+          const existingTransit = (
+            await Promise.all(
+              allCanisterBizIds.map((bId: string) =>
+                (actor as any).getTransitEntries(bId),
+              ),
+            )
+          ).flat();
+          for (const e of existingTransit) {
+            await (actor as any)
+              .deleteTransitEntry((e as any).id)
+              .catch(() => {});
+          }
+          if (data.transitGoods) {
+            for (const t of data.transitGoods as TransitRecord[]) {
+              await (actor as any)
+                .addTransitEntry(toBackendTransit(t))
+                .catch(() => {});
+            }
+          }
+        } catch (transitErr) {
+          console.warn("Transit restore partial failure:", transitErr);
         }
-        // 7. Clear & restore queue entries (pendingParcels)
-        const existingQueue = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getQueueEntries(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingQueue.map((e: any) =>
-            (actor as any).deleteQueueEntry(String(e.id)),
-          ),
-        );
-        if (data.pendingParcels) {
-          // pendingParcels in backup are queue entries — restore to backend
-          await Promise.all(
-            (data.pendingParcels as PendingParcel[]).map((p) =>
-              (actor as any).addQueueEntry(toBackendQueue(p)),
-            ),
-          );
+
+        // 6. Clear & restore transaction history sequentially
+        try {
+          const existingTxs = (
+            await Promise.all(
+              allCanisterBizIds.map((bId: string) =>
+                (actor as any).getTxHistory(bId),
+              ),
+            )
+          ).flat();
+          for (const t of existingTxs) {
+            await (actor as any).deleteTxRecord((t as any).id).catch(() => {});
+          }
+          if (data.transactions) {
+            for (const t of data.transactions as Transaction[]) {
+              await (actor as any)
+                .addTxRecord(toBackendTxRecord(t))
+                .catch(() => {});
+            }
+          }
+        } catch (txErr) {
+          console.warn("Transaction history restore partial failure:", txErr);
         }
-        // 7b. Clear & restore inward saved
-        const existingInward = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getInwardSaved(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingInward.map((e: any) =>
-            (actor as any).deleteInwardSaved(e.id),
-          ),
-        );
-        if (
-          data.inwardSaved &&
-          (data.inwardSaved as InwardSavedEntry[]).length > 0
-        ) {
-          await Promise.all(
-            (data.inwardSaved as InwardSavedEntry[]).map(
-              (e: InwardSavedEntry) =>
-                (actor as any).saveInward(toBackendInwardSaved(e)),
-            ),
-          );
+
+        // 7. Clear & restore queue entries sequentially
+        try {
+          const existingQueue = (
+            await Promise.all(
+              allCanisterBizIds.map((bId: string) =>
+                (actor as any).getQueueEntries(bId),
+              ),
+            )
+          ).flat();
+          for (const e of existingQueue) {
+            await (actor as any)
+              .deleteQueueEntry(String((e as any).id))
+              .catch(() => {});
+          }
+          if (data.pendingParcels) {
+            for (const p of data.pendingParcels as PendingParcel[]) {
+              // Use restoreQueueEntry (not addQueueEntry) to avoid the side effect
+              // in addQueueEntry that deletes transit entries with matching biltyNumber
+              await (actor as any)
+                .restoreQueueEntry(toBackendQueue(p))
+                .catch(() => {});
+            }
+          }
+        } catch (queueErr) {
+          console.warn("Queue restore partial failure:", queueErr);
         }
-        // 8. Restore godowns per business
-        if (
-          data.godowns &&
-          Array.isArray(data.godowns) &&
-          (data.godowns as any[]).length > 0
-        ) {
-          const existingGodownsAll = await (actor as any).getGodowns();
-          await Promise.all(
-            existingGodownsAll.map((g: any) =>
-              (actor as any).deleteGodown(g.id),
-            ),
-          );
-          await Promise.all(
-            (data.godowns as any[]).map((godown: any, _gIdx: number) => {
-              // Support both old format (string) and new format ({name, businessId})
+
+        // 7b. Clear & restore inward saved sequentially
+        try {
+          const existingInward = (
+            await Promise.all(
+              allCanisterBizIds.map((bId: string) =>
+                (actor as any).getInwardSaved(bId),
+              ),
+            )
+          ).flat();
+          for (const e of existingInward) {
+            await (actor as any)
+              .deleteInwardSaved((e as any).id)
+              .catch(() => {});
+          }
+          if (
+            data.inwardSaved &&
+            (data.inwardSaved as InwardSavedEntry[]).length > 0
+          ) {
+            for (const e of data.inwardSaved as InwardSavedEntry[]) {
+              await (actor as any)
+                .restoreInward(toBackendInwardSaved(e))
+                .catch(() => {});
+            }
+          }
+        } catch (inwardErr) {
+          console.warn("Inward saved restore partial failure:", inwardErr);
+        }
+
+        // 8. Restore godowns sequentially (non-critical)
+        try {
+          if (
+            data.godowns &&
+            Array.isArray(data.godowns) &&
+            (data.godowns as any[]).length > 0
+          ) {
+            const existingGodownsAll = await (actor as any).getGodowns();
+            for (const g of existingGodownsAll) {
+              await (actor as any).deleteGodown((g as any).id).catch(() => {});
+            }
+            let gIdx = 0;
+            for (const godown of data.godowns as any[]) {
               const name = typeof godown === "string" ? godown : godown.name;
               const bizId =
                 typeof godown === "string"
                   ? restoreBizId
                   : godown.businessId || restoreBizId;
-              // Use the original id from backup if available (preserves inventory godownQty references).
-              // Fall back to a deterministic id (no timestamp) so it stays stable across restores.
               const id =
                 (godown as any).id ||
-                `${name.toLowerCase().replace(/\s+/g, "-")}-${bizId}-${_gIdx}`;
-              return (actor as any).addGodown(id, name, bizId);
-            }),
+                `${name.toLowerCase().replace(/\s+/g, "-")}-${bizId}-${gIdx}`;
+              await (actor as any).addGodown(id, name, bizId).catch(() => {});
+              gIdx++;
+            }
+          }
+        } catch (gdErr) {
+          console.warn(
+            "Godowns restore partial failure (non-critical):",
+            gdErr,
           );
         }
-        // 9. Clear & restore delivery records (use restoreDelivery, NOT addDelivery,
-        //    so inventory quantities are not re-deducted — inventory was already restored above).
-        const existingDeliveries = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getDeliveries(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingDeliveries.map((d: any) =>
-            (actor as any).deleteDelivery(d.id),
-          ),
-        );
-        if (
-          data.deliveryRecords &&
-          (data.deliveryRecords as any[]).length > 0
-        ) {
-          await Promise.all(
-            (data.deliveryRecords as any[]).map((r: any) =>
-              (actor as any).restoreDelivery({
-                id: r.id || `del-${Date.now()}-${Math.random()}`,
-                deliveryType: r.type === "QUEUE" ? "QUEUE" : "GODOWN",
-                biltyNumber: r.biltyNo || "",
-                items: (r.items || []).map((i: any) => ({
-                  category: i.category || "",
-                  itemName: i.itemName || "",
-                  qty: BigInt(i.qty || 0),
-                  subCategory: i.subCategory || "",
-                  godownId: r.sourceGodown || i.godownId || "",
-                })),
-                customerName: r.customerName || "",
-                customerPhone: r.customerPhone || "",
-                deliveredBy: r.deliveredBy || "",
-                createdAt: r.deliveredAt
-                  ? BigInt(new Date(r.deliveredAt).getTime())
-                  : BigInt(Date.now()),
-                businessId: r.businessId || restoreBizId,
-              }),
-            ),
+
+        // 9. Clear & restore delivery records sequentially (non-critical)
+        try {
+          // Use allCanisterBizIds (ALL biz IDs in canister) for deletion so orphaned
+          // deliveries from previous restores with different biz IDs are also cleared.
+          const existingDeliveries = (
+            await Promise.all(
+              allCanisterBizIds.map((bId: string) =>
+                (actor as any).getDeliveries(bId),
+              ),
+            )
+          ).flat();
+          for (const d of existingDeliveries) {
+            await (actor as any).deleteDelivery((d as any).id).catch(() => {});
+          }
+          if (
+            data.deliveryRecords &&
+            (data.deliveryRecords as any[]).length > 0
+          ) {
+            for (const r of data.deliveryRecords as any[]) {
+              await (actor as any)
+                .restoreDelivery({
+                  id: r.id || `del-${Date.now()}-${Math.random()}`,
+                  deliveryType: r.type === "QUEUE" ? "QUEUE" : "GODOWN",
+                  biltyNumber: r.biltyNo || "",
+                  items: (r.items || []).map((i: any) => ({
+                    category: i.category || "",
+                    itemName: i.itemName || "",
+                    qty: BigInt(i.qty || 0),
+                    subCategory: i.subCategory || "",
+                    godownId: r.sourceGodown || i.godownId || "",
+                  })),
+                  customerName: r.customerName || "",
+                  customerPhone: r.customerPhone || "",
+                  deliveredBy: r.deliveredBy || "",
+                  createdAt: r.deliveredAt
+                    ? BigInt(new Date(r.deliveredAt).getTime())
+                    : BigInt(Date.now()),
+                  businessId: r.businessId || restoreBizId,
+                })
+                .catch(() => {});
+            }
+          }
+        } catch (delErr) {
+          console.warn(
+            "Deliveries restore partial failure (non-critical):",
+            delErr,
           );
         }
-        // 10. Clear & restore sales records (use restoreSale, NOT addSale,
-        //    so inventory quantities are not re-deducted — inventory was already restored above).
-        const existingSalesForRestore = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getSales(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingSalesForRestore.map((s: any) =>
-            (actor as any).deleteSale(s.id),
-          ),
-        );
-        // Transactions with type SALE in backup are the sales records
-        if (data.transactions && Array.isArray(data.transactions)) {
-          const saleTxns = (data.transactions as Transaction[]).filter(
-            (t) => t.type === "SALE",
-          );
-          await Promise.all(
-            saleTxns.map((t) =>
-              (actor as any).restoreSale({
-                id: t.id || `sale-${Date.now()}-${Math.random()}`,
-                businessId: (t as any).businessId || restoreBizId,
-                items: [
-                  {
-                    category: t.category || "",
-                    itemName: t.itemName || "",
-                    subCategory: (t as any).subCategory || "",
-                    qty: BigInt(t.itemsCount ?? 0),
-                    rate: Number((t as any).rate ?? 0),
-                  },
-                ],
-                recordedBy: t.user || "",
-                createdAt: t.date
-                  ? BigInt(new Date(t.date).getTime())
-                  : BigInt(Date.now()),
-              }),
-            ),
+
+        // 10. Clear & restore sales records sequentially (non-critical)
+        try {
+          // Use allCanisterBizIds (ALL biz IDs in canister) for deletion so orphaned
+          // sales from previous restores with different biz IDs are also cleared.
+          const existingSalesForRestore = (
+            await Promise.all(
+              allCanisterBizIds.map((bId: string) =>
+                (actor as any).getSales(bId),
+              ),
+            )
+          ).flat();
+          for (const s of existingSalesForRestore) {
+            await (actor as any).deleteSale((s as any).id).catch(() => {});
+          }
+          if (data.transactions && Array.isArray(data.transactions)) {
+            const saleTxns = (data.transactions as Transaction[]).filter(
+              (t) => t.type === "SALE",
+            );
+            for (const t of saleTxns) {
+              await (actor as any)
+                .restoreSale({
+                  id:
+                    t.id != null
+                      ? String(t.id)
+                      : `sale-${Date.now()}-${Math.random()}`,
+                  businessId: (t as any).businessId || restoreBizId,
+                  items: [
+                    {
+                      category: t.category || "",
+                      itemName: t.itemName || "",
+                      subCategory: (t as any).subCategory || "",
+                      qty: BigInt(t.itemsCount ?? 0),
+                      rate: Number((t as any).rate ?? 0),
+                    },
+                  ],
+                  recordedBy: t.user || "",
+                  createdAt: t.date
+                    ? BigInt(new Date(t.date).getTime())
+                    : BigInt(Date.now()),
+                })
+                .catch(() => {});
+            }
+          }
+        } catch (salesErr) {
+          console.warn(
+            "Sales restore partial failure (non-critical):",
+            salesErr,
           );
         }
+
         showNotification(
           "System Restore Complete — all data synced to backend",
         );
-        // Re-fetch from Motoko to confirm all writes landed
         activeBusinessIdRef.current = restoreBizId;
         try {
           await loadBusinessData(restoreBizId);

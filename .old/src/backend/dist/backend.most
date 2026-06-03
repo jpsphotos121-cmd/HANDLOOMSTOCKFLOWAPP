@@ -1,0 +1,202 @@
+// Version: 1.0.0
+type BiltyPrefix__216251850 = {businessId : Text; id : Text; prefix : Text};
+type Business__921584272 = {id : Text; name : Text};
+type CategoryV2__361472339 =
+  {
+    businessId : Text;
+    id : Text;
+    name : Text;
+    subCategories : [SubCategory__332487219]
+  };
+type Category__164941945 =
+  {id : Text; name : Text; subCategories : [SubCategory__332487219]};
+type Data__791452850<K, V> =
+  {var count : Nat__490723111; kvs : [var ?(K, V)]};
+type DeliveryEntry__647194752 =
+  {
+    biltyNumber : Text;
+    businessId : Text;
+    createdAt : Int;
+    customerName : Text;
+    customerPhone : Text;
+    deliveredBy : Text;
+    deliveryType : Text;
+    id : Text;
+    items : [DeliveryLineItem__146853123]
+  };
+type DeliveryLineItem__146853123 =
+  {
+    category : Text;
+    godownId : Text;
+    itemName : Text;
+    qty : Int;
+    subCategory : Text
+  };
+type GodownQty__186122001 = {godownId : Text; qty : Int};
+type Godown__650131873 = {businessId : Text; id : Text; name : Text};
+type Internal__8484328<K, V> =
+  {children : [var ?Node__46230540<K, V>]; data : Data__791452850<K, V>};
+type InventoryItem__576608082 =
+  {
+    businessId : Text;
+    category : Text;
+    godownQtys : [GodownQty__186122001];
+    id : Text;
+    itemName : Text;
+    purchaseRate : Float;
+    saleRate : Float;
+    shopQty : Int;
+    subCategory : Text
+  };
+type InwardItem__1071688554 =
+  {
+    category : Text;
+    godownQtys : [GodownQty__186122001];
+    itemName : Text;
+    purchaseRate : Float;
+    saleRate : Float;
+    shopQty : Int;
+    subCategory : Text;
+    totalQty : Int
+  };
+type InwardSavedEntry__91247452 =
+  {
+    biltyNumber : Text;
+    businessId : Text;
+    id : Text;
+    items : [InwardItem__1071688554];
+    savedAt : Int;
+    savedBy : Text;
+    supplier : Text;
+    transport : Text
+  };
+type Leaf__809889148<K, V> = {data : Data__791452850<K, V>};
+type Map__158565046<K, V> = Map__297112838<K, V>;
+type Map__297112838<K, V> =
+  {var root : Node__46230540<K, V>; var size : Nat__490723111};
+type Map__605269027<K, V> = Map__158565046<K, V>;
+type Nat__490723111 = Nat__920180692;
+type Nat__920180692 = Nat;
+type Node__46230540<K, V> =
+  {#internal : Internal__8484328<K, V>; #leaf : Leaf__809889148<K, V>};
+type QueueBale__476383253 =
+  {baleLabel : Text; category : Text; itemName : Text; status : Text};
+type QueueEntry__951384408 =
+  {
+    bales : [QueueBale__476383253];
+    biltyNumber : Text;
+    businessId : Text;
+    createdAt : Int;
+    delivered : Bool;
+    enteredBy : Text;
+    id : Text;
+    supplier : Text;
+    transport : Text
+  };
+type Role__931309261 = {#admin; #staff; #supplier};
+type SaleEntry__515101397 =
+  {
+    businessId : Text;
+    createdAt : Int;
+    id : Text;
+    items : [SaleLineItem__1060459011];
+    recordedBy : Text
+  };
+type SaleLineItem__1060459011 =
+  {
+    category : Text;
+    itemName : Text;
+    qty : Int;
+    rate : Float;
+    subCategory : Text
+  };
+type SubCategory__332487219 =
+  {fieldType : Text; id : Text; name : Text; options : [Text]};
+type TransferEntry__153595871 =
+  {
+    businessId : Text;
+    category : Text;
+    createdAt : Int;
+    fromId : Text;
+    fromType : Text;
+    id : Text;
+    itemName : Text;
+    qty : Int;
+    rate : Float;
+    subCategory : Text;
+    toId : Text;
+    toType : Text;
+    transferredBy : Text
+  };
+type TransitEntry__527361948 =
+  {
+    biltyDate : Text;
+    biltyNumber : Text;
+    businessId : Text;
+    category : Text;
+    createdAt : Int;
+    enteredBy : Text;
+    id : Text;
+    itemName : Text;
+    packages : Int;
+    supplier : Text;
+    transport : Text
+  };
+type TransportTracker__268028571 =
+  {id : Text; trackingUrl : Text; transport : Text};
+type TxRecord__523299988 =
+  {
+    biltyNumber : Text;
+    businessId : Text;
+    category : Text;
+    createdAt : Int;
+    enteredBy : Text;
+    fromLocation : Text;
+    id : Text;
+    itemName : Text;
+    notes : Text;
+    qty : Int;
+    rate : Float;
+    subCategory : Text;
+    toLocation : Text;
+    transport : Text;
+    txType : TxType__343382301
+  };
+type TxType__343382301 = {#delivery; #directStock; #inward; #sale; #transfer};
+type UserRole__1054455867 = {#admin; #guest; #user};
+type User__831686142 =
+  {
+    businessIds : [Text];
+    createdAt : Int;
+    id : Text;
+    password : Text;
+    role : Role__931309261;
+    username : Text
+  };
+actor {
+  stable accessControlState :
+    {
+      var adminAssigned : Bool;
+      userRoles : Map__605269027<Principal, UserRole__1054455867>
+    };
+  stable var appSettings : Text;
+  stable var biltyPrefixes : [{id : Text; prefix : Text}];
+  stable var biltyPrefixesV2 : [BiltyPrefix__216251850];
+  stable var businesses : [Business__921584272];
+  stable var categories : [Category__164941945];
+  stable var categoriesV2 : [CategoryV2__361472339];
+  stable var categoryBusinessMap : [(Text, Text)];
+  stable var deliveries : [DeliveryEntry__647194752];
+  stable var godowns : [Godown__650131873];
+  stable var inventory : [InventoryItem__576608082];
+  stable var inwardSaved : [InwardSavedEntry__91247452];
+  stable var queueEntries : [QueueEntry__951384408];
+  stable var sales : [SaleEntry__515101397];
+  stable var seedVersion : Nat;
+  stable var seeded : Bool;
+  stable var transfers : [TransferEntry__153595871];
+  stable var transitEntries : [TransitEntry__527361948];
+  stable var transportTrackers : [TransportTracker__268028571];
+  stable var txHistory : [TxRecord__523299988];
+  stable var users : [User__831686142]
+};

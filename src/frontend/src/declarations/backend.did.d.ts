@@ -10,13 +10,17 @@ import type { ActorMethod } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import type { Principal } from '@icp-sdk/core/principal';
 
-export interface BiltyPrefix { 'id' : string, 'prefix' : string }
-export interface Business { 'id' : string, 'name' : string }
-export interface Category {
+export interface BiltyPrefix {
   'id' : string,
+  'businessId' : string,
+  'prefix' : string,
+}
+export interface Business { 'id' : string, 'name' : string }
+export interface CategoryV2 {
+  'id' : string,
+  'businessId' : string,
   'name' : string,
   'subCategories' : Array<SubCategory>,
-  'businessId' : string,
 }
 export interface DeliveryEntry {
   'id' : string,
@@ -182,11 +186,10 @@ export type UserRole = { 'admin' : null } |
   { 'user' : null } |
   { 'guest' : null };
 export interface _SERVICE {
-  '_initializeAccessControlWithSecret' : ActorMethod<[string], undefined>,
-  'addBiltyPrefix' : ActorMethod<[string, string], undefined>,
+  '_initializeAccessControl' : ActorMethod<[], undefined>,
+  'addBiltyPrefix' : ActorMethod<[string, string, string], undefined>,
   'addBusiness' : ActorMethod<[string, string], undefined>,
   'addCategory' : ActorMethod<[string, string, string], undefined>,
-  'getCategoriesByBusiness' : ActorMethod<[string], Array<Category>>,
   'addDelivery' : ActorMethod<[DeliveryEntry], string>,
   'addGodown' : ActorMethod<[string, string, string], undefined>,
   'addInventoryItem' : ActorMethod<[InventoryItem], undefined>,
@@ -201,24 +204,31 @@ export interface _SERVICE {
     undefined
   >,
   'assignCallerUserRole' : ActorMethod<[Principal, UserRole], undefined>,
+  'batchAddInventoryItems' : ActorMethod<[Array<InventoryItem>], undefined>,
+  'batchSaveInwardItems' : ActorMethod<[string, Array<InwardItem>], undefined>,
   'biltyExists' : ActorMethod<[string], boolean>,
   'deleteBiltyPrefix' : ActorMethod<[string], undefined>,
   'deleteBusiness' : ActorMethod<[string], undefined>,
   'deleteCategory' : ActorMethod<[string, string], undefined>,
   'deleteCategoryGlobal' : ActorMethod<[string], undefined>,
+  'deleteDelivery' : ActorMethod<[string], undefined>,
   'deleteGodown' : ActorMethod<[string], undefined>,
   'deleteInventoryItem' : ActorMethod<[string], undefined>,
   'deleteInwardSaved' : ActorMethod<[string], undefined>,
   'deleteQueueEntry' : ActorMethod<[string], undefined>,
+  'deleteSale' : ActorMethod<[string], undefined>,
   'deleteSubCategory' : ActorMethod<[string, string], undefined>,
   'deleteTransitEntry' : ActorMethod<[string], undefined>,
   'deleteTransportTracker' : ActorMethod<[string], undefined>,
   'deleteTxRecord' : ActorMethod<[string], undefined>,
   'deleteUser' : ActorMethod<[string], undefined>,
+  'getAppSettings' : ActorMethod<[], string>,
   'getBiltyPrefixes' : ActorMethod<[], Array<BiltyPrefix>>,
+  'getBiltyPrefixesByBusiness' : ActorMethod<[string], Array<BiltyPrefix>>,
   'getBusinesses' : ActorMethod<[], Array<Business>>,
   'getCallerUserRole' : ActorMethod<[], UserRole>,
-  'getCategories' : ActorMethod<[], Array<Category>>,
+  'getCategories' : ActorMethod<[], Array<CategoryV2>>,
+  'getCategoriesByBusiness' : ActorMethod<[string], Array<CategoryV2>>,
   'getCurrentUser' : ActorMethod<[], string>,
   'getDeliveries' : ActorMethod<[string], Array<DeliveryEntry>>,
   'getGodowns' : ActorMethod<[], Array<Godown>>,
@@ -236,8 +246,11 @@ export interface _SERVICE {
   'login' : ActorMethod<[string, string], LoginResult>,
   'markQueueDelivered' : ActorMethod<[string], undefined>,
   'postTransfer' : ActorMethod<[TransferEntry], string>,
+  'restoreDelivery' : ActorMethod<[DeliveryEntry], undefined>,
+  'restoreInward' : ActorMethod<[InwardSavedEntry], undefined>,
+  'restoreQueueEntry' : ActorMethod<[QueueEntry], undefined>,
+  'restoreSale' : ActorMethod<[SaleEntry], undefined>,
   'saveAppSettings' : ActorMethod<[string], undefined>,
-  'getAppSettings' : ActorMethod<[], string>,
   'saveInward' : ActorMethod<[InwardSavedEntry], undefined>,
   'updateBusiness' : ActorMethod<[string, string], undefined>,
   'updateCategory' : ActorMethod<[string, string], undefined>,

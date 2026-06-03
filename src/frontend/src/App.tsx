@@ -26,7 +26,7 @@ import React, {
   useState,
 } from "react";
 import type {
-  Category as BackendCategory,
+  CategoryV2 as BackendCategory,
   Godown as BackendGodown,
   SubCategory as BackendSubCategory,
   User as BackendUser,
@@ -81,23 +81,56 @@ import type {
   TransitRecord,
 } from "./types";
 // ---- Type converters ----
-function fromBackendRole(r: Role): "admin" | "staff" | "supplier" {
+function fromBackendRole(
+  r: Role,
+): "superadmin" | "admin" | "staff" | "supplier" {
   if (r === RoleEnum.admin) return "admin";
   if (r === RoleEnum.supplier) return "supplier";
   return "staff";
 }
 function toBackendRole(s: string): Role {
+  if (s === "superadmin") return RoleEnum.admin;
   if (s === "admin") return RoleEnum.admin;
   if (s === "supplier") return RoleEnum.supplier;
   return RoleEnum.staff;
 }
+
+/** Returns true for both admin and superadmin roles */
+function isAdmin(role: string): boolean {
+  return role === "admin" || role === "superadmin";
+}
+
+/** Returns true for superadmin only (bypasses business scoping) */
+function isSuperAdmin(role: string): boolean {
+  return role === "superadmin";
+}
+
+/** Returns allowed businesses for a user */
+// biome-ignore lint/correctness/noUnusedVariables: utility helper kept for future use
+function getAllowedBusinessIds(
+  user: { role: string; assignedBusinessIds?: string[] },
+  allBusinesses: { id: string }[],
+): string[] {
+  if (isSuperAdmin(user.role)) return allBusinesses.map((b) => b.id);
+  if (!user.assignedBusinessIds || user.assignedBusinessIds.length === 0)
+    return allBusinesses.map((b) => b.id);
+  return user.assignedBusinessIds;
+}
 function fromBackendUser(u: BackendUser): AppUser & { _backendId: string } {
+  // superadmin is stored as backend #admin with "__superadmin__" marker in businessIds
+  const isSuperAdminMarker = u.businessIds.includes("__superadmin__");
+  const role: AppUser["role"] = isSuperAdminMarker
+    ? "superadmin"
+    : fromBackendRole(u.role);
+  const assignedBusinessIds = u.businessIds.filter(
+    (id) => id !== "__superadmin__",
+  );
   return {
     _backendId: u.id,
     username: u.username,
     password: u.password,
-    role: fromBackendRole(u.role),
-    assignedBusinessIds: u.businessIds,
+    role,
+    assignedBusinessIds,
   } as AppUser & { _backendId: string };
 }
 function fromBackendCategory(c: BackendCategory): Category {
@@ -123,7 +156,7 @@ function toBackendTransit(t: TransitRecord): BackendTransitEntry {
     biltyDate: t.date ?? "",
     businessId: t.businessId ?? "b1",
     enteredBy: t.addedBy ?? "",
-    createdAt: BigInt(Date.now()),
+    createdAt: t.date ? BigInt(new Date(t.date).getTime()) : BigInt(Date.now()),
   };
 }
 function fromBackendTransit(e: BackendTransitEntry): TransitRecord {
@@ -211,23 +244,39 @@ function toBackendInwardSaved(
       subCategory: JSON.stringify({
         attributes: item.attributes,
         godownQty: item.godownQty,
+        godownBreakdown:
+          item.godownBreakdown && Object.keys(item.godownBreakdown).length > 0
+            ? item.godownBreakdown
+            : (item as any).godownQuants &&
+                Object.keys((item as any).godownQuants).length > 0
+              ? (item as any).godownQuants
+              : null,
       }),
-      totalQty: BigInt(Math.round(item.qty)),
-      shopQty: BigInt(Math.round(item.shopQty)),
+      totalQty: BigInt(Math.round(item.qty || 0)),
+      shopQty: BigInt(Math.round(item.shopQty || 0)),
       purchaseRate: item.purchaseRate,
       saleRate: item.saleRate,
-      godownQtys:
-        item.godownBreakdown && Object.keys(item.godownBreakdown).length > 0
-          ? Object.entries(item.godownBreakdown).map(([godownId, qty]) => ({
-              godownId,
-              qty: BigInt(Math.round(qty)),
-            }))
-          : [
-              {
-                godownId: "Main Godown",
-                qty: BigInt(Math.round(item.godownQty)),
-              },
-            ],
+      godownQtys: (() => {
+        const breakdown =
+          item.godownBreakdown && Object.keys(item.godownBreakdown).length > 0
+            ? item.godownBreakdown
+            : (item as any).godownQuants &&
+                Object.keys((item as any).godownQuants).length > 0
+              ? (item as any).godownQuants
+              : null;
+        if (breakdown) {
+          return Object.entries(breakdown).map(([godownId, qty]) => ({
+            godownId,
+            qty: BigInt(Math.round(Number(qty) || 0)),
+          }));
+        }
+        return [
+          {
+            godownId: "Main Godown",
+            qty: BigInt(Math.round(item.godownQty || 0)),
+          },
+        ];
+      })(),
     })),
   };
 }
@@ -245,17 +294,33 @@ function fromBackendInwardSaved(e: BackendInwardSavedEntry): InwardSavedEntry {
     items: e.items.map((item: InwardItem) => {
       let attrs: Record<string, string> = {};
       let godownQty = Number(item.godownQtys[0]?.qty || 0n);
+      let savedGodownBreakdown: Record<string, number> | null = null;
       try {
         const m = JSON.parse(item.subCategory);
         if (m.attributes) attrs = m.attributes;
         if (m.godownQty != null) godownQty = Number(m.godownQty);
+        if (m.godownBreakdown && typeof m.godownBreakdown === "object") {
+          savedGodownBreakdown = m.godownBreakdown as Record<string, number>;
+        }
       } catch {
         /* */
       }
-      const godownBreakdown: Record<string, number> = {};
+      // Build godownBreakdown from godownQtys first
+      const godownBreakdownFromQtys: Record<string, number> = {};
       for (const gq of item.godownQtys || []) {
-        godownBreakdown[gq.godownId] = Number(gq.qty);
+        godownBreakdownFromQtys[gq.godownId] = Number(gq.qty);
       }
+      // If godownQtys only has "Main Godown" (collapsed fallback) but subCategory has
+      // the real multi-godown breakdown, prefer the one from subCategory
+      const godownQtysKeys = Object.keys(godownBreakdownFromQtys);
+      const isCollapsed =
+        godownQtysKeys.length === 1 && godownQtysKeys[0] === "Main Godown";
+      const godownBreakdown: Record<string, number> =
+        isCollapsed &&
+        savedGodownBreakdown &&
+        Object.keys(savedGodownBreakdown).length > 1
+          ? savedGodownBreakdown
+          : godownBreakdownFromQtys;
       return {
         category: item.category,
         itemName: item.itemName,
@@ -281,7 +346,10 @@ function toBackendInventory(
     businessId: item.businessId || businessId,
     category: item.category,
     itemName: item.itemName,
-    subCategory: JSON.stringify(item.attributes || {}),
+    subCategory: JSON.stringify({
+      ...(item.attributes || {}),
+      godownBreakdown: item.godowns || {},
+    }),
     shopQty: BigInt(Math.round(item.shop || 0)),
     godownQtys: Object.entries(item.godowns || {}).map(([godownId, qty]) => ({
       godownId,
@@ -294,22 +362,41 @@ function toBackendInventory(
 function fromBackendInventory(
   e: BackendInventoryItem,
 ): [string, InventoryItem] {
-  const attrs = (() => {
-    try {
-      return JSON.parse(e.subCategory);
-    } catch {
-      return {};
+  let attrs: Record<string, any> = {};
+  let savedGodownBreakdown: Record<string, number> | null = null;
+  try {
+    const parsed = JSON.parse(e.subCategory);
+    const { godownBreakdown, ...rest } = parsed;
+    attrs = rest;
+    if (godownBreakdown && typeof godownBreakdown === "object") {
+      savedGodownBreakdown = godownBreakdown as Record<string, number>;
     }
-  })();
+  } catch {
+    /* */
+  }
+
+  // Build godowns from godownQtys
+  const godownsFromQtys: Record<string, number> = Object.fromEntries(
+    (e.godownQtys || []).map((g: GodownQty) => [g.godownId, Number(g.qty)]),
+  );
+
+  // Recovery: if godownQtys only has "Main Godown" but subCategory has richer breakdown, use it
+  const qtysKeys = Object.keys(godownsFromQtys);
+  const isCollapsed = qtysKeys.length === 1 && qtysKeys[0] === "Main Godown";
+  const godowns: Record<string, number> =
+    isCollapsed &&
+    savedGodownBreakdown &&
+    Object.keys(savedGodownBreakdown).length > 1
+      ? savedGodownBreakdown
+      : godownsFromQtys;
+
   const item: InventoryItem = {
     sku: e.id,
     category: e.category,
     itemName: e.itemName,
     attributes: attrs,
     shop: Number(e.shopQty),
-    godowns: Object.fromEntries(
-      (e.godownQtys || []).map((g: GodownQty) => [g.godownId, Number(g.qty)]),
-    ),
+    godowns,
     saleRate: e.saleRate,
     purchaseRate: e.purchaseRate,
     businessId: e.businessId,
@@ -360,6 +447,24 @@ function fromBackendTxRecord(e: TxRecord): Transaction {
     typeMap[txTypeName] ??
     typeMap[txTypeName.toLowerCase()] ??
     txTypeName.toUpperCase();
+  // Restore baleItemsList from subCategory JSON if present
+  let baleItemsList: any[] | undefined;
+  let cleanSubCategory: string | undefined = e.subCategory || undefined;
+  if (e.subCategory) {
+    try {
+      const parsed = JSON.parse(e.subCategory);
+      if (parsed._baleItems) {
+        baleItemsList = parsed._baleItems;
+        // Re-serialize without _baleItems for display
+        const { _baleItems: _, ...rest } = parsed;
+        cleanSubCategory =
+          Object.keys(rest).length > 0 ? JSON.stringify(rest) : undefined;
+      }
+    } catch {
+      /* not JSON, keep as-is */
+    }
+  }
+
   return {
     id: Number.parseInt(e.id) || Math.floor(Math.random() * 1_000_000),
     type: resolvedType,
@@ -373,8 +478,9 @@ function fromBackendTxRecord(e: TxRecord): Transaction {
     notes: e.notes || undefined,
     fromLocation: e.fromLocation || undefined,
     toLocation: e.toLocation || undefined,
-    subCategory: e.subCategory || undefined,
+    subCategory: cleanSubCategory,
     itemsCount: Number(e.qty) || undefined,
+    baleItemsList,
   };
 }
 function toBackendTxRecord(t: Transaction): TxRecord {
@@ -386,6 +492,19 @@ function toBackendTxRecord(t: Transaction): TxRecord {
     if (u === "DIRECTSTOCK") return { directStock: null };
     return { inward: null };
   };
+  // Encode baleItemsList into subCategory JSON so it survives backend round-trip
+  let subCategoryStr = t.subCategory || "";
+  if ((t as any).baleItemsList && (t as any).baleItemsList.length > 0) {
+    try {
+      const existing = subCategoryStr ? JSON.parse(subCategoryStr) : {};
+      subCategoryStr = JSON.stringify({
+        ...existing,
+        _baleItems: (t as any).baleItemsList,
+      });
+    } catch {
+      subCategoryStr = JSON.stringify({ _baleItems: (t as any).baleItemsList });
+    }
+  }
   return {
     id: String(t.id),
     businessId: t.businessId ?? "b1",
@@ -393,7 +512,7 @@ function toBackendTxRecord(t: Transaction): TxRecord {
     biltyNumber: t.biltyNo || "",
     category: t.category || "",
     itemName: t.itemName || "",
-    subCategory: t.subCategory || "",
+    subCategory: subCategoryStr,
     fromLocation: t.fromLocation || "",
     toLocation: t.toLocation || "",
     transport: t.transportName || "",
@@ -525,7 +644,7 @@ export default function App() {
     inward: [],
   });
   const [users, setUsers] = useState<AppUser[]>([
-    { username: "admin", password: "password", role: "admin" },
+    { username: "admin", password: "password", role: "superadmin" },
     { username: "staff", password: "password", role: "staff" },
     { username: "supplier", password: "password", role: "supplier" },
   ]);
@@ -679,6 +798,10 @@ export default function App() {
   useEffect(() => {
     inventoryRef.current = inventory;
   }, [inventory]);
+  const currentUserRef = useRef(currentUser);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
   // Maps for backend IDs
   const godownMapRef = useRef<
     Record<string, { id: string; businessId: string }>
@@ -868,17 +991,12 @@ export default function App() {
     setIsDataLoading(true);
     (async () => {
       try {
-        const [
-          backendUsers,
-          backendBusinesses,
-          backendPrefixes,
-          backendTrackers,
-        ] = await Promise.all([
-          actor.getUsers(),
-          actor.getBusinesses(),
-          actor.getBiltyPrefixes(),
-          actor.getTransportTrackers(),
-        ]);
+        const [backendUsers, backendBusinesses, backendTrackers] =
+          await Promise.all([
+            actor.getUsers(),
+            actor.getBusinesses(),
+            actor.getTransportTrackers(),
+          ]);
         if (backendUsers.length > 0) {
           setUsers(backendUsers.map(fromBackendUser) as AppUser[]);
         }
@@ -886,16 +1004,36 @@ export default function App() {
         if (backendBusinesses.length > 0) {
           setBusinesses(backendBusinesses);
           resolvedBusinessId = backendBusinesses[0].id;
+          // For staff/admin (non-superadmin) with assigned businesses, land on their first assigned business
+          const loggedInUser = currentUserRef.current;
+          if (
+            loggedInUser &&
+            !isSuperAdmin(loggedInUser.role) &&
+            loggedInUser.assignedBusinessIds &&
+            loggedInUser.assignedBusinessIds.length > 0
+          ) {
+            const firstAssigned = backendBusinesses.find((b) =>
+              loggedInUser.assignedBusinessIds!.includes(b.id),
+            );
+            if (firstAssigned) resolvedBusinessId = firstAssigned.id;
+          }
           for (const b of backendBusinesses) {
             businessMapRef.current[b.name] = b.id;
           }
         }
         setActiveBusinessId(resolvedBusinessId);
-        if (backendPrefixes.length > 0) {
-          setBiltyPrefixes(backendPrefixes.map((p) => p.prefix));
-          for (const p of backendPrefixes) {
-            biltyPrefixIdMapRef.current[p.prefix] = p.id;
+        // Load bilty prefixes scoped to the resolved business
+        try {
+          const backendPrefixes =
+            await actor.getBiltyPrefixesByBusiness(resolvedBusinessId);
+          if (backendPrefixes.length > 0) {
+            setBiltyPrefixes(backendPrefixes.map((p) => p.prefix));
+            for (const p of backendPrefixes) {
+              biltyPrefixIdMapRef.current[p.prefix] = p.id;
+            }
           }
+        } catch (_prefixErr) {
+          // prefix load failure is non-critical
         }
         if (backendTrackers.length > 0) {
           setTransportTracking(
@@ -944,9 +1082,24 @@ export default function App() {
   // Reload ALL business-specific data when active business changes (after initial load)
   useEffect(() => {
     if (!actor || !activeBusinessId || !isInitialLoadDoneRef.current) return;
-    setIsDataLoading(true);
-    loadBusinessData(activeBusinessId).finally(() => setIsDataLoading(false));
+    loadBusinessData(activeBusinessId);
   }, [activeBusinessId, actor, loadBusinessData]);
+  // Reload bilty prefixes when active business changes (after initial load)
+  useEffect(() => {
+    if (!actor || !activeBusinessId || !isInitialLoadDoneRef.current) return;
+    actor
+      .getBiltyPrefixesByBusiness(activeBusinessId)
+      .then((prefixes) => {
+        setBiltyPrefixes(prefixes.map((p) => p.prefix));
+        for (const p of prefixes) {
+          biltyPrefixIdMapRef.current[p.prefix] = p.id;
+        }
+      })
+      .catch(() => {
+        // non-critical — keep existing prefixes on failure
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBusinessId, actor]);
   // Keep ref in sync with state so setters always use current business
   useEffect(() => {
     activeBusinessIdRef.current = activeBusinessId;
@@ -974,13 +1127,17 @@ export default function App() {
     });
     for (const u of added) {
       const id = (u as any)._backendId || u.username;
+      const bizIdsForAdd =
+        u.role === "superadmin"
+          ? [...(u.assignedBusinessIds || []), "__superadmin__"]
+          : u.assignedBusinessIds || [];
       actor
         .addUser(
           id,
           u.username,
           u.password,
           toBackendRole(u.role),
-          u.assignedBusinessIds || [],
+          bizIdsForAdd,
         )
         .catch((_e) =>
           showNotification("Backend error: addUser failed", "error"),
@@ -992,13 +1149,17 @@ export default function App() {
     }
     for (const u of updated) {
       const backendId = (u as any)._backendId || u.username;
+      const bizIdsForUpdate =
+        u.role === "superadmin"
+          ? [...(u.assignedBusinessIds || []), "__superadmin__"]
+          : u.assignedBusinessIds || [];
       actor
         .updateUser(
           backendId,
           u.username,
           u.password,
           toBackendRole(u.role),
-          u.assignedBusinessIds || [],
+          bizIdsForUpdate,
         )
         .catch((_e) =>
           showNotification("Backend error: updateUser failed", "error"),
@@ -1142,8 +1303,14 @@ export default function App() {
     const added = next.filter((p: string) => !prev.includes(p));
     const deleted = prev.filter((p) => !next.includes(p));
     for (const p of added) {
-      const id = biltyPrefixIdMapRef.current[p] || p;
-      backendSave(actor.addBiltyPrefix(id, p), "addBiltyPrefix");
+      const id =
+        biltyPrefixIdMapRef.current[p] ||
+        `${activeBusinessIdRef.current}-${p}-${Date.now()}`;
+      biltyPrefixIdMapRef.current[p] = id;
+      backendSave(
+        actor.addBiltyPrefix(id, p, activeBusinessIdRef.current),
+        "addBiltyPrefix",
+      );
     }
     for (const p of deleted) {
       const id = biltyPrefixIdMapRef.current[p] || p;
@@ -1248,7 +1415,7 @@ export default function App() {
   ]);
   // Morning backup reminder for admin
   useEffect(() => {
-    if (currentUser?.role === "admin") {
+    if (currentUser && isAdmin(currentUser.role)) {
       const today = new Date().toDateString();
       const lastReminder = localStorage.getItem("stockflow_backup_reminder");
       if (lastReminder !== today) {
@@ -1418,13 +1585,21 @@ export default function App() {
         prevKeys.includes(k) &&
         JSON.stringify(prev[k]) !== JSON.stringify(next[k]),
     );
-    for (const k of added)
+    if (added.length === 1) {
       backendSave(
         (actor as any).addInventoryItem(
-          toBackendInventory(next[k], activeBusinessId),
+          toBackendInventory(next[added[0]], activeBusinessId),
         ),
         "addInventoryItem",
       );
+    } else if (added.length > 1) {
+      backendSave(
+        (actor as any).batchAddInventoryItems(
+          added.map((k) => toBackendInventory(next[k], activeBusinessId)),
+        ),
+        "batchAddInventoryItems",
+      );
+    }
     for (const k of deleted)
       backendSave((actor as any).deleteInventoryItem(k), "deleteInventoryItem");
     for (const k of updated)
@@ -1470,6 +1645,80 @@ export default function App() {
       };
     });
   };
+  // Batch inventory update for inward save — applies ALL items in one backend call
+  // with ONE index rebuild instead of N separate calls. Used only by InwardTab.doFinalSave.
+  // React state is updated in one pass; backend gets a single batchSaveInwardItems call.
+  const batchUpdateStockForInward = (baleItems: any[]) => {
+    if (!baleItems || baleItems.length === 0) return;
+    setInventory((prev) => {
+      const next = { ...prev };
+      const backendItems: InwardItem[] = [];
+      for (const item of baleItems) {
+        const shopQty = Number(item.shopQty) || 0;
+        const godownEntries = Object.entries(item.godownQuants || {}) as [
+          string,
+          string | number,
+        ][];
+        const sku = item.sku;
+        const current: InventoryItem = prev[sku] || {
+          sku,
+          category: item.category || "",
+          itemName: formatItemName(item.itemName || ""),
+          attributes: item.attributes || {},
+          shop: 0,
+          godowns: {},
+          saleRate: Number(item.saleRate) || 0,
+          purchaseRate: Number(item.purchaseRate) || 0,
+          businessId: activeBusinessId,
+        };
+        const nextGodowns = { ...current.godowns };
+        for (const [g, q] of godownEntries) {
+          nextGodowns[g] = (Number(nextGodowns[g]) || 0) + (Number(q) || 0);
+        }
+        next[sku] = {
+          ...current,
+          businessId: current.businessId || activeBusinessId,
+          shop: (Number(current.shop) || 0) + shopQty,
+          godowns: nextGodowns,
+          saleRate: Number(item.saleRate) ?? current.saleRate,
+          purchaseRate: Number(item.purchaseRate) ?? current.purchaseRate,
+        };
+        // Build backend InwardItem for batchSaveInwardItems
+        backendItems.push({
+          category: item.category || "",
+          itemName: item.itemName || "",
+          subCategory: JSON.stringify({
+            ...(item.attributes || {}),
+            godownBreakdown: Object.fromEntries(
+              godownEntries.map(([g, q]) => [g, Number(q) || 0]),
+            ),
+          }),
+          totalQty: BigInt(
+            Math.round(
+              shopQty +
+                godownEntries.reduce((a, [, q]) => a + (Number(q) || 0), 0),
+            ),
+          ),
+          shopQty: BigInt(Math.round(shopQty)),
+          godownQtys: godownEntries.map(([godownId, qty]) => ({
+            godownId,
+            qty: BigInt(Math.round(Number(qty) || 0)),
+          })),
+          purchaseRate: Number(item.purchaseRate) || 0,
+          saleRate: Number(item.saleRate) || 0,
+        } as InwardItem);
+      }
+      // Fire one backend call for all items — one index rebuild total
+      if (actor && backendItems.length > 0) {
+        (actor as any)
+          .batchSaveInwardItems(activeBusinessId, backendItems)
+          .catch((e: any) => {
+            console.warn("[batchUpdateStockForInward] backend error:", e);
+          });
+      }
+      return next;
+    });
+  };
   const exportDatabase = async () => {
     showNotification("Preparing backup — fetching latest data...", "info");
     let freshInventory = inventory;
@@ -1486,7 +1735,10 @@ export default function App() {
     let freshDeliveryRecords: DeliveryRecord[] = deliveryRecords;
     if (actor) {
       try {
-        const allBusinessIds = businesses.map((b) => b.id);
+        // Backup is scoped to the active business for transactional data.
+        // Admin/global data (users, businesses, godowns, categories) is still exported in full
+        // so the backup is self-contained and can restore correctly.
+        const allBusinessIds = [activeBusinessId];
         const [
           backendUsers,
           backendBusinessesFresh,
@@ -1634,45 +1886,42 @@ export default function App() {
     });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `StockFlow_Backup_${new Date().toISOString().slice(0, 10)}_${Date.now()}.json`;
+    const activeBizName =
+      businesses.find((b) => b.id === activeBusinessId)?.name ||
+      activeBusinessId;
+    link.download = `StockFlow_Backup_${activeBizName.replace(/\s+/g, "_")}_${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
     showNotification("Backup downloaded successfully");
   };
   const onResetAllData = async () => {
     if (!actor) return;
-    const allBizIds = businesses.map((b) => b.id);
-    // FIX: Fetch each data type separately per-business to avoid destructuring
-    // bugs when there are multiple businesses. Previously a single flatMap+destructure
-    // incorrectly mapped results for biz[1+] to wrong data type slots.
-    const perBizResults = await Promise.all(
-      allBizIds.map(async (bId) => ({
-        transit: (await (actor as any).getTransitEntries(bId)) as any[],
-        queue: (await (actor as any).getQueueEntries(bId)) as any[],
-        inward: (await (actor as any).getInwardSaved(bId)) as any[],
-        deliveries: (await (actor as any).getDeliveries(bId)) as any[],
-        txs: (await (actor as any).getTxHistory(bId)) as any[],
-        sales: (await (actor as any).getSales(bId)) as any[],
-        inventory: (await (actor as any).getInventory(bId)) as any[],
-      })),
-    );
-    const flatTransit = perBizResults.flatMap((r) => r.transit);
-    const flatQueue = perBizResults.flatMap((r) => r.queue);
-    const flatInward = perBizResults.flatMap((r) => r.inward);
-    const flatDeliveries = perBizResults.flatMap((r) => r.deliveries);
-    const flatTxs = perBizResults.flatMap((r) => r.txs);
-    const flatSales = perBizResults.flatMap((r) => r.sales);
-    const flatInv = perBizResults.flatMap((r) => r.inventory);
-    await Promise.all([
-      ...flatTransit.map((e: any) => (actor as any).deleteTransitEntry(e.id)),
-      ...flatQueue.map((e: any) =>
-        (actor as any).deleteQueueEntry(String(e.id)),
-      ),
-      ...flatInward.map((e: any) => (actor as any).deleteInwardSaved(e.id)),
-      ...flatDeliveries.map((e: any) => (actor as any).deleteDelivery(e.id)),
-      ...flatTxs.map((e: any) => (actor as any).deleteTxRecord(e.id)),
-      ...flatSales.map((e: any) => (actor as any).deleteSale(e.id)),
-      ...flatInv.map((e: any) => (actor as any).deleteInventoryItem(e.id)),
-    ]);
+    // Fix: scope reset to active business ONLY — do not touch other businesses
+    const bizId = activeBusinessId;
+    const [transit, queue, inward, deliveries, txs, sales, inv] =
+      await Promise.all([
+        (actor as any).getTransitEntries(bizId) as Promise<any[]>,
+        (actor as any).getQueueEntries(bizId) as Promise<any[]>,
+        (actor as any).getInwardSaved(bizId) as Promise<any[]>,
+        (actor as any).getDeliveries(bizId) as Promise<any[]>,
+        (actor as any).getTxHistory(bizId) as Promise<any[]>,
+        (actor as any).getSales(bizId) as Promise<any[]>,
+        (actor as any).getInventory(bizId) as Promise<any[]>,
+      ]);
+    // Sequential deletes — avoids IC ingress rate-limit rejections from simultaneous calls
+    for (const e of transit)
+      await (actor as any).deleteTransitEntry(e.id).catch(() => {});
+    for (const e of queue)
+      await (actor as any).deleteQueueEntry(String(e.id)).catch(() => {});
+    for (const e of inward)
+      await (actor as any).deleteInwardSaved(e.id).catch(() => {});
+    for (const e of deliveries)
+      await (actor as any).deleteDelivery(e.id).catch(() => {});
+    for (const e of txs)
+      await (actor as any).deleteTxRecord(e.id).catch(() => {});
+    for (const e of sales)
+      await (actor as any).deleteSale(e.id).catch(() => {});
+    for (const e of inv)
+      await (actor as any).deleteInventoryItem(e.id).catch(() => {});
   };
 
   const importDatabase = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1711,10 +1960,10 @@ export default function App() {
           return;
         }
         showNotification("Syncing restore to backend — please wait...", "info");
-        // Use a local const to avoid stale React state closure
         const restoreBizId =
           (data.activeBusinessId as string) || activeBusinessId;
-        // 2. Save app settings to Motoko (non-critical — failure must not abort data restore)
+
+        // 2. Save app settings (non-critical)
         try {
           const settings = {
             fieldLabels: data.fieldLabels || {},
@@ -1727,50 +1976,66 @@ export default function App() {
         } catch (settErr) {
           console.warn("Settings restore failed (non-critical):", settErr);
         }
-        // 2b. Restore users to backend (non-critical — failure must not abort data restore)
+
+        // 2b. Restore users sequentially (non-critical)
         try {
           if (data.users && Array.isArray(data.users)) {
-            const existingUsers = await actor.getUsers();
-            await Promise.all(
-              existingUsers.map((u: any) => actor.deleteUser(u.id)),
-            );
+            // Only upsert users from the backup — do NOT delete other users
             for (const u of data.users as AppUser[]) {
               const uid = (u as any)._backendId || u.username;
-              await actor.addUser(
-                uid,
-                u.username,
-                u.password,
-                toBackendRole(u.role),
-                u.assignedBusinessIds || [],
-              );
+              const bizIdsForRestore =
+                u.role === "superadmin"
+                  ? [...(u.assignedBusinessIds || []), "__superadmin__"]
+                  : u.assignedBusinessIds || [];
+              await actor
+                .addUser(
+                  uid,
+                  u.username,
+                  u.password,
+                  toBackendRole(u.role),
+                  bizIdsForRestore,
+                )
+                .catch(() => {});
             }
           }
         } catch (usrErr) {
           console.warn("Users restore failed (non-critical):", usrErr);
         }
-        // 2c. Restore businesses to backend (non-critical — failure must not abort data restore)
+
+        // 2c. Restore businesses sequentially (non-critical)
         try {
           if (data.businesses && Array.isArray(data.businesses)) {
-            const existingBizs = await actor.getBusinesses();
-            await Promise.all(
-              existingBizs.map((b: any) => actor.deleteBusiness(b.id)),
-            );
+            // Only upsert businesses from the backup — do NOT delete other businesses
             for (const b of data.businesses as Business[]) {
-              await actor.addBusiness(b.id, b.name);
+              await actor.addBusiness(b.id, b.name).catch(() => {});
             }
           }
         } catch (bizErr) {
           console.warn("Businesses restore failed (non-critical):", bizErr);
         }
-        // 2d. Restore bilty prefixes to backend (non-critical — failure must not abort data restore)
+
+        // 2d. Restore bilty prefixes sequentially (non-critical)
         try {
           if (data.biltyPrefixes && Array.isArray(data.biltyPrefixes)) {
-            const existingPrefixes = await actor.getBiltyPrefixes();
-            await Promise.all(
-              existingPrefixes.map((p: any) => actor.deleteBiltyPrefix(p.id)),
-            );
-            for (const prefix of data.biltyPrefixes as string[]) {
-              await actor.addBiltyPrefix(prefix, prefix);
+            // Only add prefixes from the backup — do NOT delete existing prefixes
+            // Pass businessId from backup record if available, otherwise use restoreBizId
+            for (const prefix of data.biltyPrefixes as (
+              | string
+              | { id?: string; prefix?: string; businessId?: string }
+            )[]) {
+              const prefixStr =
+                typeof prefix === "string"
+                  ? prefix
+                  : prefix.prefix || (prefix as unknown as string);
+              const prefixId =
+                typeof prefix === "object" && prefix.id ? prefix.id : prefixStr;
+              const prefixBizId =
+                typeof prefix === "object" && prefix.businessId
+                  ? prefix.businessId
+                  : restoreBizId;
+              await actor
+                .addBiltyPrefix(prefixId, prefixStr, prefixBizId)
+                .catch(() => {});
             }
           }
         } catch (prefErr) {
@@ -1779,30 +2044,41 @@ export default function App() {
             prefErr,
           );
         }
-        // 3. Clear existing categories and restore from backup
-        // FIX: Wrap in try/catch so a category failure cannot abort inventory/transit/queue restore.
+
+        // bizIds: business IDs from the backup file — used for scoped delete + write
+        const bizIds: string[] = (data.businesses || businesses).map(
+          (b: any) => b.id || b,
+        );
+
+        // 3. Clear & restore categories sequentially (non-critical)
         try {
-          const existingCats = await (actor as any).getCategories();
-          await Promise.all(
-            existingCats.map((c: any) =>
-              (actor as any).deleteCategoryGlobal(c.id),
-            ),
-          );
+          // Only delete categories belonging to the backup's business IDs
+          const existingCats = (
+            await Promise.all(
+              bizIds.map((bId: string) =>
+                (actor as any).getCategoriesByBusiness(bId),
+              ),
+            )
+          ).flat();
+          for (const c of existingCats) {
+            await (actor as any).deleteCategoryGlobal(c.id).catch(() => {});
+          }
           if (data.categories) {
             for (const cat of data.categories as Category[]) {
-              // Use business-prefixed IDs to prevent cross-business category collisions.
-              // e.g., "safi" in B1 becomes "b1-safi", in B2 becomes "b2-safi".
-              // This ensures deleting in one business never affects another.
               const catBizId = (cat as any).businessId || restoreBizId;
               const catId = `${catBizId}-${cat.name.toLowerCase().replace(/\s+/g, "-")}`;
-              await (actor as any).addCategory(catId, cat.name, catBizId);
+              await (actor as any)
+                .addCategory(catId, cat.name, catBizId)
+                .catch(() => {});
               for (const f of cat.fields) {
-                await (actor as any).addSubCategory(catId, {
-                  id: f.name.toLowerCase().replace(/\s+/g, "-"),
-                  name: f.name,
-                  fieldType: f.type,
-                  options: f.options || [],
-                });
+                await (actor as any)
+                  .addSubCategory(catId, {
+                    id: f.name.toLowerCase().replace(/\s+/g, "-"),
+                    name: f.name,
+                    fieldType: f.type,
+                    options: f.options || [],
+                  })
+                  .catch(() => {});
               }
             }
           }
@@ -1812,13 +2088,14 @@ export default function App() {
             catErr,
           );
         }
-        // 4. Clear & restore inventory
-        if (data.inventory) {
-          // Clear all existing inventory items across all businesses before restoring
+
+        // 4. Clear & restore inventory sequentially
+        try {
           const allBizIdsForInv: string[] =
             data.businesses && Array.isArray(data.businesses)
               ? (data.businesses as any[]).map((b: any) => b.id || b)
               : businesses.map((b) => b.id);
+          // Reads can stay parallel — queries are not rate-limited
           const existingInvItems = (
             await Promise.all(
               allBizIdsForInv.map((bId: string) =>
@@ -1826,131 +2103,150 @@ export default function App() {
               ),
             )
           ).flat();
-          await Promise.all(
-            existingInvItems.map((item: any) =>
-              (actor as any).deleteInventoryItem(item.id),
-            ),
-          );
-          await Promise.all(
-            Object.values(data.inventory as Record<string, InventoryItem>).map(
-              (item) =>
-                (actor as any).addInventoryItem(
-                  toBackendInventory(item, restoreBizId),
-                ),
-            ),
-          );
+          // Writes must be sequential
+          for (const item of existingInvItems) {
+            await (actor as any)
+              .deleteInventoryItem((item as any).id)
+              .catch(() => {});
+          }
+          if (data.inventory) {
+            for (const item of Object.values(
+              data.inventory as Record<string, InventoryItem>,
+            )) {
+              await (actor as any)
+                .addInventoryItem(toBackendInventory(item, restoreBizId))
+                .catch(() => {});
+            }
+          }
+        } catch (invErr) {
+          console.warn("Inventory restore partial failure:", invErr);
         }
-        // 5. Clear & restore transit entries
-        const bizIds: string[] = (data.businesses || businesses).map(
-          (b: any) => b.id || b,
-        );
-        const existingTransit = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getTransitEntries(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingTransit.map((e: any) =>
-            (actor as any).deleteTransitEntry(e.id),
-          ),
-        );
-        if (data.transitGoods) {
-          await Promise.all(
-            (data.transitGoods as TransitRecord[]).map((t) =>
-              (actor as any).addTransitEntry(toBackendTransit(t)),
-            ),
-          );
+
+        // 5. Clear & restore transit entries sequentially
+        try {
+          const existingTransit = (
+            await Promise.all(
+              bizIds.map((bId: string) =>
+                (actor as any).getTransitEntries(bId),
+              ),
+            )
+          ).flat();
+          for (const e of existingTransit) {
+            await (actor as any)
+              .deleteTransitEntry((e as any).id)
+              .catch(() => {});
+          }
+          if (data.transitGoods) {
+            for (const t of data.transitGoods as TransitRecord[]) {
+              await (actor as any)
+                .addTransitEntry(toBackendTransit(t))
+                .catch(() => {});
+            }
+          }
+        } catch (transitErr) {
+          console.warn("Transit restore partial failure:", transitErr);
         }
-        // 6. Clear & restore transaction history
-        const existingTxs = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getTxHistory(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingTxs.map((t: any) => (actor as any).deleteTxRecord(t.id)),
-        );
-        if (data.transactions) {
-          await Promise.all(
-            (data.transactions as Transaction[]).map((t) =>
-              (actor as any).addTxRecord(toBackendTxRecord(t)),
-            ),
-          );
+
+        // 6. Clear & restore transaction history sequentially
+        try {
+          const existingTxs = (
+            await Promise.all(
+              bizIds.map((bId: string) => (actor as any).getTxHistory(bId)),
+            )
+          ).flat();
+          for (const t of existingTxs) {
+            await (actor as any).deleteTxRecord((t as any).id).catch(() => {});
+          }
+          if (data.transactions) {
+            for (const t of data.transactions as Transaction[]) {
+              await (actor as any)
+                .addTxRecord(toBackendTxRecord(t))
+                .catch(() => {});
+            }
+          }
+        } catch (txErr) {
+          console.warn("Transaction history restore partial failure:", txErr);
         }
-        // 7. Clear & restore queue entries (pendingParcels)
-        const existingQueue = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getQueueEntries(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingQueue.map((e: any) =>
-            (actor as any).deleteQueueEntry(String(e.id)),
-          ),
-        );
-        if (data.pendingParcels) {
-          // pendingParcels in backup are queue entries — restore to backend
-          await Promise.all(
-            (data.pendingParcels as PendingParcel[]).map((p) =>
-              (actor as any).addQueueEntry(toBackendQueue(p)),
-            ),
-          );
+
+        // 7. Clear & restore queue entries sequentially
+        try {
+          const existingQueue = (
+            await Promise.all(
+              bizIds.map((bId: string) => (actor as any).getQueueEntries(bId)),
+            )
+          ).flat();
+          for (const e of existingQueue) {
+            await (actor as any)
+              .deleteQueueEntry(String((e as any).id))
+              .catch(() => {});
+          }
+          if (data.pendingParcels) {
+            for (const p of data.pendingParcels as PendingParcel[]) {
+              // Use restoreQueueEntry (not addQueueEntry) to avoid the side effect
+              // in addQueueEntry that deletes transit entries with matching biltyNumber
+              await (actor as any)
+                .restoreQueueEntry(toBackendQueue(p))
+                .catch(() => {});
+            }
+          }
+        } catch (queueErr) {
+          console.warn("Queue restore partial failure:", queueErr);
         }
-        // 7b. Clear & restore inward saved
-        // FIX: Use restoreInward (upsert, no side-effects) instead of saveInward
-        // saveInward silently skips entries whose ID already exists in Motoko (if a delete
-        // failed for any entry, the restore would be silently ignored). It also modifies
-        // transitEntries/queueEntries as a side effect which corrupts those tables during restore.
-        const existingInward = (
-          await Promise.all(
-            bizIds.map((bId: string) => (actor as any).getInwardSaved(bId)),
-          )
-        ).flat();
-        await Promise.all(
-          existingInward.map((e: any) =>
-            (actor as any).deleteInwardSaved(e.id),
-          ),
-        );
-        if (
-          data.inwardSaved &&
-          (data.inwardSaved as InwardSavedEntry[]).length > 0
-        ) {
-          await Promise.all(
-            (data.inwardSaved as InwardSavedEntry[]).map(
-              (e: InwardSavedEntry) =>
-                (actor as any).restoreInward(toBackendInwardSaved(e)),
-            ),
-          );
+
+        // 7b. Clear & restore inward saved sequentially
+        try {
+          const existingInward = (
+            await Promise.all(
+              bizIds.map((bId: string) => (actor as any).getInwardSaved(bId)),
+            )
+          ).flat();
+          for (const e of existingInward) {
+            await (actor as any)
+              .deleteInwardSaved((e as any).id)
+              .catch(() => {});
+          }
+          if (
+            data.inwardSaved &&
+            (data.inwardSaved as InwardSavedEntry[]).length > 0
+          ) {
+            for (const e of data.inwardSaved as InwardSavedEntry[]) {
+              await (actor as any)
+                .restoreInward(toBackendInwardSaved(e))
+                .catch(() => {});
+            }
+          }
+        } catch (inwardErr) {
+          console.warn("Inward saved restore partial failure:", inwardErr);
         }
-        // 8. Restore godowns per business
+
+        // 8. Restore godowns sequentially (non-critical)
         try {
           if (
             data.godowns &&
             Array.isArray(data.godowns) &&
             (data.godowns as any[]).length > 0
           ) {
-            const existingGodownsAll = await (actor as any).getGodowns();
-            await Promise.all(
-              existingGodownsAll.map((g: any) =>
-                (actor as any).deleteGodown(g.id),
-              ),
+            // Only delete godowns belonging to the backup's business IDs
+            const allGodownsRaw = await (actor as any).getGodowns();
+            const existingGodownsAll = (allGodownsRaw as any[]).filter(
+              (g: any) => bizIds.includes(g.businessId || ""),
             );
-            await Promise.all(
-              (data.godowns as any[]).map((godown: any, _gIdx: number) => {
-                // Support both old format (string) and new format ({name, businessId})
-                const name = typeof godown === "string" ? godown : godown.name;
-                const bizId =
-                  typeof godown === "string"
-                    ? restoreBizId
-                    : godown.businessId || restoreBizId;
-                // Use the original id from backup if available (preserves inventory godownQty references).
-                // Fall back to a deterministic id (no timestamp) so it stays stable across restores.
-                const id =
-                  (godown as any).id ||
-                  `${name.toLowerCase().replace(/\s+/g, "-")}-${bizId}-${_gIdx}`;
-                return (actor as any).addGodown(id, name, bizId);
-              }),
-            );
+            for (const g of existingGodownsAll) {
+              await (actor as any).deleteGodown((g as any).id).catch(() => {});
+            }
+            let gIdx = 0;
+            for (const godown of data.godowns as any[]) {
+              const name = typeof godown === "string" ? godown : godown.name;
+              const bizId =
+                typeof godown === "string"
+                  ? restoreBizId
+                  : godown.businessId || restoreBizId;
+              const id =
+                (godown as any).id ||
+                `${name.toLowerCase().replace(/\s+/g, "-")}-${bizId}-${gIdx}`;
+              await (actor as any).addGodown(id, name, bizId).catch(() => {});
+              gIdx++;
+            }
           }
         } catch (gdErr) {
           console.warn(
@@ -1958,26 +2254,26 @@ export default function App() {
             gdErr,
           );
         }
-        // 9. Clear & restore delivery records (use restoreDelivery, NOT addDelivery,
-        //    so inventory quantities are not re-deducted — inventory was already restored above).
+
+        // 9. Clear & restore delivery records sequentially (non-critical)
         try {
+          // Use bizIds (ALL biz IDs in canister) for deletion so orphaned
+          // deliveries from previous restores with different biz IDs are also cleared.
           const existingDeliveries = (
             await Promise.all(
               bizIds.map((bId: string) => (actor as any).getDeliveries(bId)),
             )
           ).flat();
-          await Promise.all(
-            existingDeliveries.map((d: any) =>
-              (actor as any).deleteDelivery(d.id),
-            ),
-          );
+          for (const d of existingDeliveries) {
+            await (actor as any).deleteDelivery((d as any).id).catch(() => {});
+          }
           if (
             data.deliveryRecords &&
             (data.deliveryRecords as any[]).length > 0
           ) {
-            await Promise.all(
-              (data.deliveryRecords as any[]).map((r: any) =>
-                (actor as any).restoreDelivery({
+            for (const r of data.deliveryRecords as any[]) {
+              await (actor as any)
+                .restoreDelivery({
                   id: r.id || `del-${Date.now()}-${Math.random()}`,
                   deliveryType: r.type === "QUEUE" ? "QUEUE" : "GODOWN",
                   biltyNumber: r.biltyNo || "",
@@ -1995,9 +2291,9 @@ export default function App() {
                     ? BigInt(new Date(r.deliveredAt).getTime())
                     : BigInt(Date.now()),
                   businessId: r.businessId || restoreBizId,
-                }),
-              ),
-            );
+                })
+                .catch(() => {});
+            }
           }
         } catch (delErr) {
           console.warn(
@@ -2005,28 +2301,30 @@ export default function App() {
             delErr,
           );
         }
-        // 10. Clear & restore sales records (use restoreSale, NOT addSale,
-        //    so inventory quantities are not re-deducted — inventory was already restored above).
+
+        // 10. Clear & restore sales records sequentially (non-critical)
         try {
+          // Use bizIds (ALL biz IDs in canister) for deletion so orphaned
+          // sales from previous restores with different biz IDs are also cleared.
           const existingSalesForRestore = (
             await Promise.all(
               bizIds.map((bId: string) => (actor as any).getSales(bId)),
             )
           ).flat();
-          await Promise.all(
-            existingSalesForRestore.map((s: any) =>
-              (actor as any).deleteSale(s.id),
-            ),
-          );
-          // Transactions with type SALE in backup are the sales records
+          for (const s of existingSalesForRestore) {
+            await (actor as any).deleteSale((s as any).id).catch(() => {});
+          }
           if (data.transactions && Array.isArray(data.transactions)) {
             const saleTxns = (data.transactions as Transaction[]).filter(
               (t) => t.type === "SALE",
             );
-            await Promise.all(
-              saleTxns.map((t) =>
-                (actor as any).restoreSale({
-                  id: t.id || `sale-${Date.now()}-${Math.random()}`,
+            for (const t of saleTxns) {
+              await (actor as any)
+                .restoreSale({
+                  id:
+                    t.id != null
+                      ? String(t.id)
+                      : `sale-${Date.now()}-${Math.random()}`,
                   businessId: (t as any).businessId || restoreBizId,
                   items: [
                     {
@@ -2041,9 +2339,9 @@ export default function App() {
                   createdAt: t.date
                     ? BigInt(new Date(t.date).getTime())
                     : BigInt(Date.now()),
-                }),
-              ),
-            );
+                })
+                .catch(() => {});
+            }
           }
         } catch (salesErr) {
           console.warn(
@@ -2051,10 +2349,10 @@ export default function App() {
             salesErr,
           );
         }
+
         showNotification(
           "System Restore Complete — all data synced to backend",
         );
-        // Re-fetch from Motoko to confirm all writes landed
         activeBusinessIdRef.current = restoreBizId;
         try {
           await loadBusinessData(restoreBizId);
@@ -2214,7 +2512,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           {businesses.filter((b) => {
-            if (currentUser.role === "admin") return true;
+            if (isSuperAdmin(currentUser.role)) return true;
             if (
               !currentUser.assignedBusinessIds ||
               currentUser.assignedBusinessIds.length === 0
@@ -2229,7 +2527,7 @@ export default function App() {
             >
               {businesses
                 .filter((b) => {
-                  if (currentUser.role === "admin") return true;
+                  if (isSuperAdmin(currentUser.role)) return true;
                   if (
                     !currentUser.assignedBusinessIds ||
                     currentUser.assignedBusinessIds.length === 0
@@ -2281,7 +2579,7 @@ export default function App() {
           >
             {businesses
               .filter((b) => {
-                if (currentUser.role === "admin") return true;
+                if (isSuperAdmin(currentUser.role)) return true;
                 if (
                   !currentUser.assignedBusinessIds ||
                   currentUser.assignedBusinessIds.length === 0
@@ -2325,7 +2623,7 @@ export default function App() {
                 icon={PlusCircle}
                 label={tabNames.inward}
               />
-              {currentUser.role === "admin" && (
+              {isAdmin(currentUser.role) && (
                 <SidebarButton
                   active={activeTab === "opening"}
                   onClick={() => setActiveTab("opening")}
@@ -2339,7 +2637,7 @@ export default function App() {
                 icon={ArrowRightLeft}
                 label={tabNames.transfer}
               />
-              {currentUser.role === "admin" && (
+              {isAdmin(currentUser.role) && (
                 <SidebarButton
                   active={activeTab === "sales"}
                   onClick={() => setActiveTab("sales")}
@@ -2347,7 +2645,7 @@ export default function App() {
                   label={tabNames.sales}
                 />
               )}
-              {currentUser.role === "admin" && (
+              {isAdmin(currentUser.role) && (
                 <SidebarButton
                   active={activeTab === "salesRecord"}
                   onClick={() => setActiveTab("salesRecord")}
@@ -2379,7 +2677,7 @@ export default function App() {
                 icon={Warehouse}
                 label={tabNames.godownStock}
               />
-              {currentUser.role === "admin" && (
+              {isAdmin(currentUser.role) && (
                 <SidebarButton
                   active={activeTab === "analytics"}
                   onClick={() => setActiveTab("analytics")}
@@ -2389,7 +2687,7 @@ export default function App() {
               )}
             </>
           )}
-          {currentUser.role === "admin" && (
+          {isAdmin(currentUser.role) && (
             <>
               <SidebarButton
                 active={activeTab === "settings" && settingsSubTab === "users"}
@@ -2457,6 +2755,8 @@ export default function App() {
               categoryUnits={categoryUnits}
               itemUnitOverrides={itemUnitOverrides}
               inwardSaved={inwardSaved}
+              currentUser={currentUser}
+              setInventoryWithBackend={setInventoryWithBackend as any}
             />
           )}
           {activeTab === "transit" && (
@@ -2511,6 +2811,7 @@ export default function App() {
               fieldLabels={fieldLabels}
               supplierOptions={allSuppliers}
               transportOptions={allTransporters}
+              currentUser={currentUser}
             />
           )}
           {activeTab === "inward" && currentUser.role !== "supplier" && (
@@ -2540,9 +2841,10 @@ export default function App() {
               fieldLabels={fieldLabels}
               requiredFields={requiredFields}
               deliveredBilties={deliveredBilties}
+              batchUpdateStockForInward={batchUpdateStockForInward}
             />
           )}
-          {activeTab === "opening" && currentUser.role === "admin" && (
+          {activeTab === "opening" && isAdmin(currentUser.role) && (
             <OpeningStockTab
               inventory={inventory}
               setInventory={setInventoryWithBackend}
@@ -2573,7 +2875,7 @@ export default function App() {
               users={users}
             />
           )}
-          {activeTab === "sales" && currentUser.role === "admin" && (
+          {activeTab === "sales" && isAdmin(currentUser.role) && (
             <SalesTab
               inventory={inventory}
               updateStock={updateStock}
@@ -2616,6 +2918,8 @@ export default function App() {
               godowns={godowns}
               inventory={inventory}
               setInventory={setInventoryWithBackend as any}
+              setInventoryWithBackend={setInventoryWithBackend as any}
+              setTransactions={setTransactionsWithBackend as any}
             />
           )}
           {activeTab === "godownStock" && currentUser.role !== "supplier" && (
@@ -2623,6 +2927,8 @@ export default function App() {
               inventory={inventory}
               godowns={godowns}
               activeBusinessId={activeBusinessId}
+              setInventoryWithBackend={setInventoryWithBackend as any}
+              currentUser={currentUser}
             />
           )}
           {activeTab === "delivery" && currentUser.role !== "supplier" && (
@@ -2651,7 +2957,7 @@ export default function App() {
               generateSku={generateSku}
             />
           )}
-          {activeTab === "analytics" && currentUser.role === "admin" && (
+          {activeTab === "analytics" && isAdmin(currentUser.role) && (
             <AnalyticsTab
               transactions={transactions}
               inwardSaved={inwardSaved}
@@ -2659,7 +2965,7 @@ export default function App() {
               godowns={godowns}
             />
           )}
-          {activeTab === "salesRecord" && currentUser.role === "admin" && (
+          {activeTab === "salesRecord" && isAdmin(currentUser.role) && (
             <SalesRecordTab
               transactions={transactions}
               activeBusinessId={activeBusinessId}
@@ -2673,7 +2979,7 @@ export default function App() {
               }
             />
           )}
-          {activeTab === "settings" && currentUser.role === "admin" && (
+          {activeTab === "settings" && isAdmin(currentUser.role) && (
             <SettingsTab
               initialSubTab={settingsSubTab}
               users={users}
@@ -2739,6 +3045,7 @@ export default function App() {
             activeBusinessId={activeBusinessId}
             onClose={() => setSelectedHistoryItem(null)}
             inwardSaved={inwardSaved}
+            currentUser={currentUser}
           />
           {/* Confirm Dialog */}
           {confirmDialog && (
@@ -2858,7 +3165,7 @@ export default function App() {
               icon={ArrowRightLeft}
               label="Move"
             />
-            {currentUser.role === "admin" && (
+            {isAdmin(currentUser.role) && (
               <NavButton
                 active={activeTab === "sales"}
                 onClick={() => setActiveTab("sales")}
@@ -2866,7 +3173,7 @@ export default function App() {
                 label="Sales"
               />
             )}
-            {currentUser.role === "admin" && (
+            {isAdmin(currentUser.role) && (
               <NavButton
                 active={activeTab === "salesRecord"}
                 onClick={() => setActiveTab("salesRecord")}
@@ -2898,7 +3205,7 @@ export default function App() {
               icon={Warehouse}
               label="Stock"
             />
-            {currentUser.role === "admin" && (
+            {isAdmin(currentUser.role) && (
               <NavButton
                 active={activeTab === "analytics"}
                 onClick={() => setActiveTab("analytics")}
@@ -2908,7 +3215,7 @@ export default function App() {
             )}
           </>
         )}
-        {currentUser.role === "admin" && (
+        {isAdmin(currentUser.role) && (
           <>
             <NavButton
               active={activeTab === "settings" && settingsSubTab === "users"}

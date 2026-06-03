@@ -41,17 +41,19 @@ function BiltyPrefixManager({
   biltyPrefixes,
   setBiltyPrefixes,
   showNotification,
+  activeBusinessId: _activeBusinessId,
 }: {
   biltyPrefixes: string[];
   setBiltyPrefixes: React.Dispatch<React.SetStateAction<string[]>>;
   showNotification: (m: string, t?: string) => void;
+  activeBusinessId: string;
 }) {
   const [newPrefix, setNewPrefix] = useState("");
   const [editValues, setEditValues] = useState<Record<number, string>>({});
 
   return (
     <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm max-w-lg">
-      <h4 className="font-black text-xs uppercase tracking-widest text-blue-900 mb-6">
+      <h4 className="font-black text-xs uppercase tracking-widest text-blue-900 mb-2">
         Bilty Prefixes
       </h4>
       <div className="space-y-3 mb-6">
@@ -325,7 +327,6 @@ function SettingsTab({
   >;
 }) {
   const [activeSub, setActiveSub] = useState(initialSubTab || "businesses");
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally sync when prop changes
   useEffect(() => {
     if (initialSubTab) setActiveSub(initialSubTab);
   }, [initialSubTab]);
@@ -409,7 +410,11 @@ function SettingsTab({
   };
 
   // Redirect non-admins away from "users" sub-tab
-  if (activeSub === "users" && settingsCurrentUser?.role !== "admin") {
+  if (
+    activeSub === "users" &&
+    settingsCurrentUser?.role !== "admin" &&
+    settingsCurrentUser?.role !== "superadmin"
+  ) {
     setActiveSub("businesses");
   }
 
@@ -429,7 +434,12 @@ function SettingsTab({
       "units",
       "data",
     ] as const
-  ).filter((sub) => sub !== "users" || settingsCurrentUser?.role === "admin");
+  ).filter(
+    (sub) =>
+      sub !== "users" ||
+      settingsCurrentUser?.role === "admin" ||
+      settingsCurrentUser?.role === "superadmin",
+  );
 
   return (
     <div className="space-y-6 animate-fade-in-down relative">
@@ -802,6 +812,7 @@ function SettingsTab({
               >
                 <option value="staff">Staff</option>
                 <option value="admin">Admin</option>
+                <option value="superadmin">Super Admin</option>
                 <option value="supplier">Supplier</option>
               </select>
               <button
@@ -837,7 +848,7 @@ function SettingsTab({
                   <p className="text-[9px] font-black text-blue-600 uppercase tracking-widest mt-1">
                     {u.role}
                   </p>
-                  {u.role !== "admin" && (
+                  {u.role !== "superadmin" && (
                     <div className="mt-2">
                       <p className="text-[9px] font-black uppercase text-gray-400 tracking-widest mb-1">
                         Business Access
@@ -1796,9 +1807,10 @@ function SettingsTab({
 
       {activeSub === "biltyprefix" && setBiltyPrefixes && (
         <BiltyPrefixManager
-          biltyPrefixes={biltyPrefixes}
+          biltyPrefixes={biltyPrefixes ?? []}
           setBiltyPrefixes={setBiltyPrefixes}
           showNotification={showNotification}
+          activeBusinessId={activeBusinessId}
         />
       )}
 
@@ -2180,12 +2192,47 @@ function SettingsTab({
                   "Type RESET to confirm deleting all transactional data (Transit, Queue, Inward, Inventory, Deliveries, Sales):",
                 );
                 if (confirmed === "RESET") {
-                  if (setTransitGoods) setTransitGoods([]);
-                  if (setPendingParcels) setPendingParcels([]);
-                  if (setInwardSaved) setInwardSaved([]);
-                  if (setInventory) setInventory({});
-                  if (setTransactions) setTransactions([]);
-                  if (setDeliveryRecords) setDeliveryRecords([]);
+                  // Fix: scope frontend state clears to active business only
+                  const bizId = activeBusinessId;
+                  if (setTransitGoods)
+                    setTransitGoods((prev) =>
+                      prev.filter(
+                        (r) => r.businessId && r.businessId !== bizId,
+                      ),
+                    );
+                  if (setPendingParcels)
+                    setPendingParcels((prev) =>
+                      prev.filter(
+                        (r) => r.businessId && r.businessId !== bizId,
+                      ),
+                    );
+                  if (setInwardSaved)
+                    setInwardSaved((prev) =>
+                      prev.filter(
+                        (r) => r.businessId && r.businessId !== bizId,
+                      ),
+                    );
+                  if (setInventory)
+                    setInventory((prev) => {
+                      const next = { ...prev };
+                      for (const k of Object.keys(next)) {
+                        if (!next[k].businessId || next[k].businessId === bizId)
+                          delete next[k];
+                      }
+                      return next;
+                    });
+                  if (setTransactions)
+                    setTransactions((prev) =>
+                      prev.filter(
+                        (r) => r.businessId && r.businessId !== bizId,
+                      ),
+                    );
+                  if (setDeliveryRecords)
+                    setDeliveryRecords((prev) =>
+                      prev.filter(
+                        (r) => r.businessId && r.businessId !== bizId,
+                      ),
+                    );
                   if (setDeliveredBilties) setDeliveredBilties([]);
                   showNotification(
                     "Resetting backend data — please wait...",
